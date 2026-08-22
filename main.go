@@ -347,7 +347,7 @@ func scanDomainAttempt(domain string, client *http.Client, timeout time.Duration
 		// Liveness checks do not need page content. Close the body immediately
 		// after headers are received so HTML is not downloaded or parsed.
 		resp.Body.Close()
-		item.HTTPActive = status == http.StatusOK || (status >= 300 && status < 400) || status == http.StatusUnauthorized || status == http.StatusForbidden
+		item.HTTPActive = (status >= 200 && status < 300) || (status >= 300 && status < 400) || status == http.StatusUnauthorized || status == http.StatusForbidden
 		if requestErr != nil && requestErr != http.ErrUseLastResponse {
 			item.Error = stringPtr(requestErr.Error())
 		}

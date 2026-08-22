@@ -30,13 +30,13 @@ func TestSplitCreatesDeterministicParts(t *testing.T) {
 }
 
 func TestActiveStatusRules(t *testing.T) {
-	active := []int{200, 301, 302, 399, 401, 403}
+	active := []int{200, 202, 206, 301, 302, 399, 401, 403}
 	for _, status := range active {
-		if !(status == 200 || status >= 300 && status < 400 || status == 401 || status == 403) {
+		if !((status >= 200 && status < 300) || status >= 300 && status < 400 || status == 401 || status == 403) {
 			t.Fatalf("status %d should be active", status)
 		}
 	}
-	if 404 == 200 || 404 >= 300 && 404 < 400 || 404 == 401 || 404 == 403 {
+	if 404 >= 200 && 404 < 300 || 404 >= 300 && 404 < 400 || 404 == 401 || 404 == 403 {
 		t.Fatal("404 should be inactive")
 	}
 }
