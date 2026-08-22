@@ -1,0 +1,7 @@
+go-live-checker
+parts/
+results/
+*.jsonl
+*.txt
+*.log
+*.part
