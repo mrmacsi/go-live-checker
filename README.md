@@ -41,7 +41,8 @@ Laptop 1:
 ./go-live-checker scan \
   --input parts/part-1-of-2.txt \
   --output results-1.jsonl \
-  --workers 256 \
+  --workers 512 \
+  --attempts 2 \
   --timeout 10s \
   --resume
 ```
@@ -53,7 +54,8 @@ The scanner:
 - resolves DNS before HTTP checking
 - tries HTTPS, then HTTP if HTTPS fails
 - follows redirects and records the final URL and redirect chain
-- records final HTTP status and HTML title where available
+- records final HTTP status, without downloading or parsing HTML bodies
+- retries transient DNS/HTTP failures up to two total attempts
 - considers 200, 3xx, 401, and 403 active
 - writes one JSON result per domain
 - resumes by skipping domains already present in the result file
@@ -79,9 +81,10 @@ without holding every domain in memory.
 
 ## Tuning
 
-Start with 128–256 workers and a 10-second timeout. Higher concurrency can be
-faster, but DNS resolvers and remote websites may rate-limit the scanner. Use
-`--max-body` to reduce HTML reading when titles are not important.
+Start with 512 workers and a 10-second timeout. Higher concurrency can be
+faster, but DNS resolvers and remote websites may rate-limit the scanner. The
+scanner sends a small range hint and closes the response immediately after
+headers; it does not download or parse HTML.
 
 ## Result example
 

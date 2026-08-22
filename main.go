@@ -8,14 +8,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"html"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -24,20 +22,18 @@ import (
 
 const scannerUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
 
-var titlePattern = regexp.MustCompile(`(?is)<title(?:\s[^>]*)?>(.*?)</title\s*>`)
-
 type result struct {
 	Domain        string   `json:"domain"`
 	DNSActive     bool     `json:"dns_active"`
 	HTTPActive    bool     `json:"http_active"`
 	HTTPStatus    *int     `json:"http_status"`
 	FinalURL      *string  `json:"final_url"`
-	Title         *string  `json:"title"`
 	RedirectCount int      `json:"redirect_count"`
 	RedirectChain []string `json:"redirect_chain,omitempty"`
 	CheckedAt     string   `json:"checked_at"`
 	ResponseMS    float64  `json:"response_ms"`
 	Error         *string  `json:"error"`
+	Attempts      int      `json:"attempts"`
 }
 
 type summary struct {
@@ -87,7 +83,7 @@ Commands:
 
 Examples:
   go-live-checker split --input uk-domains.txt --parts 2 --output-dir parts
-  go-live-checker scan --input parts/part-1-of-2.txt --output results-1.jsonl --workers 256 --timeout 10s --resume
+  go-live-checker scan --input parts/part-1-of-2.txt --output results-1.jsonl --workers 512 --attempts 2 --timeout 10s --resume
   go-live-checker merge --input-dir . --pattern 'results-*.jsonl' --active-output uk-active-domains.txt --inactive-output uk-inactive-domains.txt`)
 }
 
@@ -172,10 +168,10 @@ func runScan(args []string) error {
 	flags.SetOutput(os.Stderr)
 	input := flags.String("input", "", "newline-delimited domain list")
 	output := flags.String("output", "results.jsonl", "JSONL result file")
-	workers := flags.Int("workers", 256, "concurrent workers")
+	workers := flags.Int("workers", 512, "concurrent workers")
 	timeout := flags.Duration("timeout", 10*time.Second, "DNS/connect/read timeout")
 	batchSize := flags.Int("batch-size", 1000, "flush progress after this many results")
-	maxBody := flags.Int64("max-body", 1<<20, "maximum HTML bytes read per response")
+	attempts := flags.Int("attempts", 2, "maximum DNS/HTTP attempts per domain")
 	resume := flags.Bool("resume", false, "append results and skip domains already present in the output")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -183,8 +179,8 @@ func runScan(args []string) error {
 	if *input == "" {
 		return errors.New("scan requires --input")
 	}
-	if *workers < 1 || *timeout <= 0 || *batchSize < 1 || *maxBody < 1 {
-		return errors.New("workers, timeout, batch-size, and max-body must be positive")
+	if *workers < 1 || *timeout <= 0 || *batchSize < 1 || *attempts < 1 {
+		return errors.New("workers, timeout, batch-size, and attempts must be positive")
 	}
 
 	done := map[string]struct{}{}
@@ -233,7 +229,7 @@ func runScan(args []string) error {
 		go func() {
 			defer workersGroup.Done()
 			for domain := range jobs {
-				results <- scanDomain(domain, client, *timeout, *maxBody)
+				results <- scanDomain(domain, client, *timeout, *attempts)
 			}
 		}()
 	}
@@ -285,14 +281,28 @@ func runScan(args []string) error {
 	return nil
 }
 
-func scanDomain(domain string, client *http.Client, timeout time.Duration, maxBody int64) result {
+func scanDomain(domain string, client *http.Client, timeout time.Duration, attempts int) result {
 	started := time.Now()
+	var last result
+	for attempt := 1; attempt <= attempts; attempt++ {
+		last = scanDomainAttempt(domain, client, timeout)
+		last.Attempts = attempt
+		if !shouldRetry(last) || attempt == attempts {
+			last.ResponseMS = elapsedMS(started)
+			return last
+		}
+		time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+	}
+	last.ResponseMS = elapsedMS(started)
+	return last
+}
+
+func scanDomainAttempt(domain string, client *http.Client, timeout time.Duration) result {
 	item := result{Domain: domain, CheckedAt: time.Now().UTC().Format(time.RFC3339)}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	_, dnsErr := net.DefaultResolver.LookupHost(ctx, domain)
 	cancel()
 	if dnsErr != nil {
-		item.ResponseMS = elapsedMS(started)
 		item.Error = stringPtr(dnsErr.Error())
 		return item
 	}
@@ -308,7 +318,8 @@ func scanDomain(domain string, client *http.Client, timeout time.Duration, maxBo
 			continue
 		}
 		req.Header.Set("User-Agent", scannerUserAgent)
-		req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Range", "bytes=0-0")
 		clientForRequest := *client
 		clientForRequest.CheckRedirect = func(next *http.Request, via []*http.Request) error {
 			redirectCount++
@@ -333,26 +344,25 @@ func scanDomain(domain string, client *http.Client, timeout time.Duration, maxBo
 		item.FinalURL = &finalURL
 		item.RedirectCount = redirectCount
 		item.RedirectChain = redirectChain
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+		// Liveness checks do not need page content. Close the body immediately
+		// after headers are received so HTML is not downloaded or parsed.
 		resp.Body.Close()
-		if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "html") || resp.Header.Get("Content-Type") == "" {
-			if match := titlePattern.FindSubmatch(body); len(match) > 1 {
-				title := strings.TrimSpace(html.UnescapeString(string(match[1])))
-				if title != "" {
-					item.Title = &title
-				}
-			}
-		}
 		item.HTTPActive = status == http.StatusOK || (status >= 300 && status < 400) || status == http.StatusUnauthorized || status == http.StatusForbidden
 		if requestErr != nil && requestErr != http.ErrUseLastResponse {
 			item.Error = stringPtr(requestErr.Error())
 		}
-		item.ResponseMS = elapsedMS(started)
 		return item
 	}
 
-	item.ResponseMS = elapsedMS(started)
 	return item
+}
+
+func shouldRetry(item result) bool {
+	if !item.DNSActive || item.HTTPStatus == nil {
+		return true
+	}
+	status := *item.HTTPStatus
+	return status == http.StatusRequestTimeout || status == http.StatusTooEarly || status == http.StatusTooManyRequests || status >= 500
 }
 
 func runMerge(args []string) error {
