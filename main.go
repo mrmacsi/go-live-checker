@@ -211,7 +211,10 @@ func runScan(args []string) error {
 	defer outputFile.Close()
 
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy: http.ProxyFromEnvironment,
+		// Bodies are intentionally not read for liveness-only probes. Do not
+		// reuse connections with unread response data on the wire.
+		DisableKeepAlives:     true,
 		MaxIdleConns:          *workers * 2,
 		MaxIdleConnsPerHost:   8,
 		IdleConnTimeout:       30 * time.Second,
