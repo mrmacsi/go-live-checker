@@ -220,8 +220,11 @@ func runScan(args []string) error {
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   *timeout,
 		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		// Header-only probes close the body before consuming it. Keep these
+		// requests on HTTP/1.1 so unread response frames cannot remain on an
+		// HTTP/2 stream.
+		ForceAttemptHTTP2: false,
+		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 	client := &http.Client{Transport: transport, Timeout: *timeout}
 	jobs := make(chan string, *workers*2)
