@@ -90,8 +90,7 @@ def crawler_specs(args: argparse.Namespace) -> list[Dict[str, Any]]:
                     required = ("key", "label", "host", "input", "results", "log", "stats")
                     if all(str(item.get(field, "")).strip() for field in required):
                         valid.append({**item, "mode": item.get("mode", "auto")})
-                if valid:
-                    return valid
+                return valid
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             pass
     return [

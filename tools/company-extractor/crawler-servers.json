@@ -1,12 +1,1 @@
-[
-  {
-    "key": "crawler",
-    "label": "Crawler server",
-    "mode": "auto",
-    "host": "gcloud",
-    "input": "~/crawler/data/m1-input-last-100k.txt",
-    "results": "~/crawler/data/company-extractor-last-100k.jsonl",
-    "log": "~/crawler/logs/company-extractor-last-100k.log",
-    "stats": "~/crawler/data/company-extractor-last-100k.stats.json"
-  }
-]
+[]
