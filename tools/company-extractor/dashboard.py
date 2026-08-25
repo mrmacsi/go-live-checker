@@ -558,7 +558,9 @@ class Dashboard:
         now = time.time()
         m1 = read_json(self.args.m1_state) or blank("M1")
         m1["available"] = True
-        if self.args.m4_mode == "disabled":
+        if self.args.m4_local_state:
+            m4 = read_json(self.args.m4_local_state) or blank("M4")
+        elif self.args.m4_mode == "disabled":
             m4 = blank("M4")
         else:
             with self.lock:
@@ -574,7 +576,9 @@ class Dashboard:
             m4["available"] = True
         m1_results = self.args.m1_results or self.args.m1_state.with_name("m1-results.jsonl")
         m1["resources"] = local_resources(m1_results)
-        if m4.get("pushed_at"):
+        if self.args.m4_local_results:
+            m4["resources"] = local_resources(self.args.m4_local_results)
+        elif m4.get("pushed_at"):
             m4["resources"] = m4.get("resources") or blank_resources()
         else:
             m4["resources"] = remote_resources(self.args.m4_host, str(Path(self.args.m4_state).with_name("m4-results.jsonl")))
@@ -744,6 +748,8 @@ def main() -> None:
     parser.add_argument("--m1-results", type=Path, help="override the local M1 JSONL used for storage metrics")
     parser.add_argument("--m4-host", default="webpro@192.168.1.203")
     parser.add_argument("--m4-state", required=True)
+    parser.add_argument("--m4-local-state", type=Path, help="read M4 state from a local sidecar instead of SSH")
+    parser.add_argument("--m4-local-results", type=Path, help="use a local M4 JSONL for storage metrics")
     parser.add_argument("--crawler-config", type=Path, default=Path(__file__).with_name("crawler-servers.json"))
     parser.add_argument("--crawler-host", default="gcloud")
     parser.add_argument("--crawler-input", default="~/crawler/data/m1-input-last-100k.txt")
