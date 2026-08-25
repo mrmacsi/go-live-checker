@@ -601,6 +601,10 @@ class Dashboard:
                     detailed = remote_json(host, stats_path, timeout=10, connect_timeout=6)
                     if detailed is not None:
                         crawler = detailed
+                        # A readable sidecar is proof that the remote runner is
+                        # reachable, even though older batch_runner versions
+                        # did not include an explicit `available` field.
+                        crawler["available"] = True
                     else:
                         progress = remote_crawler_progress(host, input_path, results_path, log_path)
                         if cached is not None:

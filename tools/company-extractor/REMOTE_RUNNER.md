@@ -43,3 +43,37 @@ batches by default. It pauses and resumes the M1 LaunchAgent around the queue
 change, uses a lock plus atomic replacements, and refuses to overwrite an
 existing extracted input. If deployment fails after the queue move, rerun
 with `--reuse-input` to deploy the saved input without moving another tail.
+
+## GCP multi-server batches
+
+`gcp_batch.py` splits a queue tail into equal files, creates one GCE VM per
+chunk, deploys the current Linux Go binary, starts resumable runners, and adds
+each job to the dashboard. The current quota-safe C3 choice is four
+`c3-highcpu-4` VMs in `europe-west2-b` (four `c3-highcpu-8` VMs would exceed
+the project C3 CPU quota).
+
+```bash
+python3 tools/company-extractor/gcp_batch.py launch \
+  --queue company-extractor/live-dashboard/m1-input.txt \
+  --batch-id m1-tail-500k-20260825 \
+  --tail 500000 \
+  --servers 4 \
+  --machine-type c3-highcpu-4 \
+  --zone europe-west2-b \
+  --workers 128 \
+  --timeout 8 \
+  --attempts 2 \
+  --batch-size 2000
+```
+
+When every job reports `complete`, collect and delete the VMs with:
+
+```bash
+python3 tools/company-extractor/gcp_batch.py collect-destroy \
+  --batch-id m1-tail-500k-20260825
+```
+
+The collect step verifies each downloaded JSONL with SHA-256 before deleting
+the corresponding VM. It refuses to delete incomplete jobs unless
+`--force` is explicitly supplied. A failed launch can reuse its already-made
+split with `--reuse-input`.
