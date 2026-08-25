@@ -572,7 +572,8 @@ class Dashboard:
         m4["machine"] = "M4"
         if m4.get("status") != "offline":
             m4["available"] = True
-        m1["resources"] = local_resources(self.args.m1_state.with_name("m1-results.jsonl"))
+        m1_results = self.args.m1_results or self.args.m1_state.with_name("m1-results.jsonl")
+        m1["resources"] = local_resources(m1_results)
         if m4.get("pushed_at"):
             m4["resources"] = m4.get("resources") or blank_resources()
         else:
@@ -740,6 +741,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--refresh", type=int, default=5)
     parser.add_argument("--m1-state", required=True, type=Path)
+    parser.add_argument("--m1-results", type=Path, help="override the local M1 JSONL used for storage metrics")
     parser.add_argument("--m4-host", default="webpro@192.168.1.203")
     parser.add_argument("--m4-state", required=True)
     parser.add_argument("--crawler-config", type=Path, default=Path(__file__).with_name("crawler-servers.json"))
