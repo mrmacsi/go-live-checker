@@ -582,6 +582,14 @@ class Dashboard:
             m4["resources"] = m4.get("resources") or blank_resources()
         else:
             m4["resources"] = remote_resources(self.args.m4_host, str(Path(self.args.m4_state).with_name("m4-results.jsonl")))
+        liveness = read_json(self.args.liveness_state) if self.args.liveness_state else None
+        if liveness is None:
+            liveness = blank("M1 inactive recheck")
+        else:
+            liveness["available"] = True
+            liveness["machine"] = "M1 inactive recheck"
+        if self.args.liveness_results:
+            liveness["resources"] = local_resources(self.args.liveness_results)
         crawlers = {}
         for spec in crawler_specs(self.args):
             key = str(spec["key"])
@@ -634,9 +642,9 @@ class Dashboard:
         add_timing(m4, now)
         for crawler in crawlers.values():
             add_timing(crawler, now)
-        machine_keys = ["m1", "m4", *crawlers.keys()]
+        machine_keys = ["m1", "m4", "m1-liveness", *crawlers.keys()]
         with self.lock:
-            self.data = {"m1": m1, "m4": m4, **crawlers, "combined": combined(m1, m4, *crawlers.values()), "machine_keys": machine_keys, "refreshed_at": time.time()}
+            self.data = {"m1": m1, "m4": m4, "m1-liveness": liveness, **crawlers, "combined": combined(m1, m4, *crawlers.values()), "machine_keys": machine_keys, "refreshed_at": time.time()}
 
     def loop(self) -> None:
         while True:
@@ -750,6 +758,8 @@ def main() -> None:
     parser.add_argument("--m4-state", required=True)
     parser.add_argument("--m4-local-state", type=Path, help="read M4 state from a local sidecar instead of SSH")
     parser.add_argument("--m4-local-results", type=Path, help="use a local M4 JSONL for storage metrics")
+    parser.add_argument("--liveness-state", type=Path, help="local standalone Go liveness progress state")
+    parser.add_argument("--liveness-results", type=Path, help="local standalone Go liveness JSONL")
     parser.add_argument("--crawler-config", type=Path, default=Path(__file__).with_name("crawler-servers.json"))
     parser.add_argument("--crawler-host", default="gcloud")
     parser.add_argument("--crawler-input", default="~/crawler/data/m1-input-last-100k.txt")
