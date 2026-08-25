@@ -238,7 +238,7 @@ def collect_destroy(args: argparse.Namespace) -> None:
     for server in manifest["servers"]:
         job = server["job"]
         try:
-            command = f"python3 -c 'import json; print(json.dumps(json.load(open(\"$HOME/crawler/data/{job}.state.json\"))))'"
+            command = f"python3 -c 'import json, os; print(json.dumps(json.load(open(os.path.expanduser(\"~/crawler/data/{job}.state.json\")))))'"
             raw = gssh(server["instance"], manifest["zone"], command, capture=True)
             state = json.loads(raw.strip().splitlines()[-1])
         except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError):
