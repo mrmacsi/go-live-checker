@@ -1,0 +1,32 @@
+[
+  {
+    "key": "crawler",
+    "label": "Crawler server",
+    "mode": "auto",
+    "host": "gcloud",
+    "input": "~/crawler/data/m1-input-last-100k.txt",
+    "results": "~/crawler/data/company-extractor-last-100k.jsonl",
+    "log": "~/crawler/logs/company-extractor-last-100k.log",
+    "stats": "~/crawler/data/company-extractor-last-100k.stats.json"
+  },
+  {
+    "key": "c3-m1-tail-100k",
+    "label": "C3 highcpu-8 \u00b7 M1 tail 1",
+    "mode": "auto",
+    "host": "c3-highcpu-8",
+    "input": "~/crawler/data/m1-input-last-100k.txt",
+    "results": "~/crawler/data/company-extractor-last-100k.jsonl",
+    "log": "~/crawler/logs/company-extractor-last-100k.log",
+    "stats": "~/crawler/data/company-extractor-last-100k.stats.json"
+  },
+  {
+    "key": "c3-m1-tail-2-100k",
+    "label": "C3 highcpu-8 \u00b7 M1 tail 2",
+    "mode": "auto",
+    "host": "c3-highcpu-8",
+    "input": "~/crawler/data/c3-m1-tail-2-100k.input.txt",
+    "results": "~/crawler/data/c3-m1-tail-2-100k.jsonl",
+    "log": "~/crawler/logs/c3-m1-tail-2-100k.log",
+    "stats": "~/crawler/data/c3-m1-tail-2-100k.state.json"
+  }
+]

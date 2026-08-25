@@ -25,3 +25,21 @@ sharing or overwriting results.
 The dashboard accepts the old crawler through `--crawler-*` arguments and an
 additional host through `--crawler2-*` arguments. The current C3 defaults are
 `c3-highcpu-8` and the standard `~/crawler/data` / `~/crawler/logs` paths.
+
+For the complete queue operation—pause M1, move a tail, deploy/start the job,
+and register it in the dashboard—use:
+
+```bash
+tools/company-extractor/dispatch_job.sh \
+  --queue company-extractor/live-dashboard/m1-input.txt \
+  --host c3-highcpu-8 \
+  --job c3-m1-tail-2-100k \
+  --label 'C3 highcpu-8 · M1 tail 2' \
+  --tail 100000
+```
+
+The script uses 128 workers, an 8-second timeout, 2 attempts, and 2,000-domain
+batches by default. It pauses and resumes the M1 LaunchAgent around the queue
+change, uses a lock plus atomic replacements, and refuses to overwrite an
+existing extracted input. If deployment fails after the queue move, rerun
+with `--reuse-input` to deploy the saved input without moving another tail.

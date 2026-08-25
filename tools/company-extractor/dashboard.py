@@ -74,6 +74,32 @@ def read_json(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def crawler_specs(args: argparse.Namespace) -> list[Dict[str, Any]]:
+    """Load crawler definitions so new jobs can register without code edits."""
+    config_path = getattr(args, "crawler_config", None)
+    if config_path:
+        try:
+            loaded = json.loads(Path(config_path).read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                loaded = loaded.get("servers", [])
+            if isinstance(loaded, list):
+                valid = []
+                for item in loaded:
+                    if not isinstance(item, dict):
+                        continue
+                    required = ("key", "label", "host", "input", "results", "log", "stats")
+                    if all(str(item.get(field, "")).strip() for field in required):
+                        valid.append({**item, "mode": item.get("mode", "auto")})
+                if valid:
+                    return valid
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return [
+        {"key": "crawler", "label": "Crawler server", "mode": args.crawler_mode, "host": args.crawler_host, "input": args.crawler_input, "results": args.crawler_results, "log": args.crawler_log, "stats": args.crawler_stats},
+        {"key": "c3", "label": "C3 highcpu-8", "mode": args.crawler2_mode, "host": args.crawler2_host, "input": args.crawler2_input, "results": args.crawler2_results, "log": args.crawler2_log, "stats": args.crawler2_stats},
+    ]
+
+
 def remote_json(host: str, path: str, *, timeout: float = 4, connect_timeout: int = 2) -> Optional[Dict[str, Any]]:
     try:
         result = subprocess.run(
@@ -516,9 +542,8 @@ class Dashboard:
         self.data: Dict[str, Any] = {
             "m1": blank("M1"),
             "m4": blank("M4"),
-            "crawler": blank("Crawler server"),
-            "c3": blank("C3 highcpu-8"),
             "combined": blank("combined"),
+            "machine_keys": ["m1", "m4"],
         }
         self.refresh()
 
@@ -554,11 +579,15 @@ class Dashboard:
         else:
             m4["resources"] = remote_resources(self.args.m4_host, str(Path(self.args.m4_state).with_name("m4-results.jsonl")))
         crawlers = {}
-        crawler_specs = (
-            ("crawler", "Crawler server", self.args.crawler_mode, self.args.crawler_host, self.args.crawler_input, self.args.crawler_results, self.args.crawler_log, self.args.crawler_stats),
-            ("c3", "C3 highcpu-8", self.args.crawler2_mode, self.args.crawler2_host, self.args.crawler2_input, self.args.crawler2_results, self.args.crawler2_log, self.args.crawler2_stats),
-        )
-        for key, label, mode, host, input_path, results_path, log_path, stats_path in crawler_specs:
+        for spec in crawler_specs(self.args):
+            key = str(spec["key"])
+            label = str(spec["label"])
+            mode = str(spec.get("mode", "auto"))
+            host = str(spec["host"])
+            input_path = str(spec["input"])
+            results_path = str(spec["results"])
+            log_path = str(spec["log"])
+            stats_path = str(spec["stats"])
             if mode == "disabled":
                 crawler = blank(label)
             else:
@@ -593,14 +622,13 @@ class Dashboard:
                     crawler["resources"] = remote_resources(host, results_path)
             crawler["machine"] = label
             crawlers[key] = crawler
-        crawler = crawlers["crawler"]
-        crawler2 = crawlers["c3"]
         add_timing(m1, now)
         add_timing(m4, now)
-        add_timing(crawler, now)
-        add_timing(crawler2, now)
+        for crawler in crawlers.values():
+            add_timing(crawler, now)
+        machine_keys = ["m1", "m4", *crawlers.keys()]
         with self.lock:
-            self.data = {"m1": m1, "m4": m4, "crawler": crawler, "c3": crawler2, "combined": combined(m1, m4, crawler, crawler2), "refreshed_at": time.time()}
+            self.data = {"m1": m1, "m4": m4, **crawlers, "combined": combined(m1, m4, *crawlers.values()), "machine_keys": machine_keys, "refreshed_at": time.time()}
 
     def loop(self) -> None:
         while True:
@@ -620,7 +648,7 @@ table{border-collapse:collapse;width:100%;background:#fff;border-radius:12px;ove
 <div class="grid" id="summary"></div><div class="section"><h2>Machine progress</h2><table><thead><tr><th>Machine</th><th>Progress</th><th>Elapsed</th><th>Active</th><th>Inactive</th><th>Avg domains/sec</th><th>Last batch/sec</th><th>ETA</th><th>Est. finish</th><th>Status</th></tr></thead><tbody id="machines"></tbody></table></div>
 <div class="section"><h2>Machine resources</h2><table><thead><tr><th>Machine</th><th>Go CPU</th><th>Go RAM</th><th>System RAM</th><th>Extracted JSONL</th></tr></thead><tbody id="resources"></tbody></table></div>
 <div class="section"><h2>Company metadata</h2><table><thead><tr><th>Machine</th><th>ATS traceable</th><th>Has email</th><th>Company number</th><th>Careers page</th><th>Errors</th></tr></thead><tbody id="metadata"></tbody></table></div>
-<div class="section"><h2>Detected platforms</h2><table><thead><tr><th>Platform</th><th class="right">Combined</th><th class="right">M1</th><th class="right">M4</th><th class="right">Crawler server</th><th class="right">C3 highcpu-8</th></tr></thead><tbody id="platforms"></tbody></table></div>
+<div class="section"><h2>Detected platforms</h2><table><thead id="platform-head"></thead><tbody id="platforms"></tbody></table></div>
 <script>
 const fmt=n=>Number(n||0).toLocaleString(); const pct=(a,b)=>b?((a/b)*100).toFixed(1)+'%':'0.0%';
 const duration=s=>{s=Math.max(0,Number(s||0));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);if(h)return h+'h '+m+'m';return m+'m'};
@@ -628,12 +656,13 @@ const eta=s=>{s=Number(s||0);if(!s)return '—';if(s<3600)return Math.round(s/60
 const finish=at=>at?new Date(at).toLocaleString():'—';
 const mb=n=>Number(n||0).toFixed(1)+' MB';
 function card(label,value){return `<div class="card"><div class="label">${label}</div><div class="value">${fmt(value)}</div></div>`}
-function render(d){const c=d.combined;document.getElementById('updated').textContent='Last dashboard refresh: '+new Date().toLocaleString()+(d.m4.available?'':' · M1-only; M4 unavailable')+(d.crawler.available?'':' · Crawler server unavailable')+(d.c3.available?'':' · C3 unavailable');
+function render(d){const c=d.combined;const keys=d.machine_keys||['m1','m4','crawler','c3'];document.getElementById('updated').textContent='Last dashboard refresh: '+new Date().toLocaleString()+keys.filter(k=>!d[k].available).map(k=>' · '+d[k].machine+' unavailable').join('');
 document.getElementById('summary').innerHTML=[card('Processed',c.processed),card('Remaining',c.remaining),card('Active',c.active),card('Inactive',c.inactive),card('ATS traceable',c.ats_traceable),card('Has email',c.has_email),card('Company number',c.company_number),card('Careers page',c.careers_page)].join('');
-document.getElementById('machines').innerHTML=['m1','m4','crawler','c3'].map(k=>{let x=d[k];if(!x.available)return `<tr><td>${x.machine}</td><td colspan="9">N/A — machine unavailable</td></tr>`;return `<tr><td>${x.machine}</td><td>${fmt(x.processed)} / ${fmt(x.total)}<div class="bar"><div class="fill" style="width:${pct(x.processed,x.total)}"></div></div></td><td>${duration(x.elapsed_seconds)}</td><td>${fmt(x.active)}</td><td>${fmt(x.inactive)}</td><td>${Number(x.rate_per_second||0).toFixed(2)}/s</td><td>${Number(x.last_batch_rate_per_second||0).toFixed(2)}/s</td><td>${eta(x.eta_seconds)}</td><td>${finish(x.eta_at)}</td><td class="status-${x.status}">${x.status}</td></tr>`}).join('');
-document.getElementById('resources').innerHTML=['m1','m4','crawler','c3'].map(k=>{let x=d[k];if(!x.available)return `<tr><td>${x.machine}</td><td colspan="4">N/A — machine unavailable</td></tr>`;let r=x.resources||{};return `<tr><td>${x.machine}</td><td>${Number(r.extractor_cpu_percent||0).toFixed(1)}%</td><td>${Number(r.extractor_ram_mb||0).toFixed(0)} MB</td><td>${mb(r.memory_used_gb*1024)} / ${mb(r.memory_total_gb*1024)}</td><td>${mb(r.results_json_mb)}</td></tr>`}).join('');
-document.getElementById('metadata').innerHTML=['m1','m4','crawler','c3','combined'].map(k=>{let x=d[k];if(!x.available)return `<tr><td>${x.machine}</td><td colspan="5">N/A — machine unavailable</td></tr>`;return `<tr><td>${x.machine}</td><td>${fmt(x.ats_traceable)}</td><td>${fmt(x.has_email)}</td><td>${fmt(x.company_number)}</td><td>${fmt(x.careers_page)}</td><td>${fmt(x.errors)}</td></tr>`}).join('');
-document.getElementById('platforms').innerHTML=Object.keys(c.platform_counts||{}).map(p=>`<tr><td>${p}</td><td class="right">${fmt(c.platform_counts[p])}</td><td class="right">${fmt((d.m1.platform_counts||{})[p])}</td><td class="right">${fmt((d.m4.platform_counts||{})[p])}</td><td class="right">${fmt((d.crawler.platform_counts||{})[p])}</td><td class="right">${fmt((d.c3.platform_counts||{})[p])}</td></tr>`).join('')}
+document.getElementById('machines').innerHTML=keys.map(k=>{let x=d[k];if(!x.available)return `<tr><td>${x.machine}</td><td colspan="9">N/A — machine unavailable</td></tr>`;return `<tr><td>${x.machine}</td><td>${fmt(x.processed)} / ${fmt(x.total)}<div class="bar"><div class="fill" style="width:${pct(x.processed,x.total)}"></div></div></td><td>${duration(x.elapsed_seconds)}</td><td>${fmt(x.active)}</td><td>${fmt(x.inactive)}</td><td>${Number(x.rate_per_second||0).toFixed(2)}/s</td><td>${Number(x.last_batch_rate_per_second||0).toFixed(2)}/s</td><td>${eta(x.eta_seconds)}</td><td>${finish(x.eta_at)}</td><td class="status-${x.status}">${x.status}</td></tr>`}).join('');
+document.getElementById('resources').innerHTML=keys.map(k=>{let x=d[k];if(!x.available)return `<tr><td>${x.machine}</td><td colspan="4">N/A — machine unavailable</td></tr>`;let r=x.resources||{};return `<tr><td>${x.machine}</td><td>${Number(r.extractor_cpu_percent||0).toFixed(1)}%</td><td>${Number(r.extractor_ram_mb||0).toFixed(0)} MB</td><td>${mb(r.memory_used_gb*1024)} / ${mb(r.memory_total_gb*1024)}</td><td>${mb(r.results_json_mb)}</td></tr>`}).join('');
+document.getElementById('metadata').innerHTML=[...keys,'combined'].map(k=>{let x=d[k];if(!x.available)return `<tr><td>${x.machine}</td><td colspan="5">N/A — machine unavailable</td></tr>`;return `<tr><td>${x.machine}</td><td>${fmt(x.ats_traceable)}</td><td>${fmt(x.has_email)}</td><td>${fmt(x.company_number)}</td><td>${fmt(x.careers_page)}</td><td>${fmt(x.errors)}</td></tr>`}).join('');
+document.getElementById('platform-head').innerHTML='<tr><th>Platform</th><th class="right">Combined</th>'+keys.map(k=>`<th class="right">${d[k].machine}</th>`).join('')+'</tr>';
+document.getElementById('platforms').innerHTML=Object.keys(c.platform_counts||{}).map(p=>`<tr><td>${p}</td><td class="right">${fmt(c.platform_counts[p])}</td>`+keys.map(k=>`<td class="right">${fmt((d[k].platform_counts||{})[p])}</td>`).join('')+'</tr>').join('')}
 async function poll(){try{const t=new URLSearchParams(location.search).get('token')||'';const r=await fetch('/api/stats'+(t?'?token='+encodeURIComponent(t):''),{cache:'no-store'});if(r.ok)render(await r.json())}catch(e){}setTimeout(poll,5000)} poll();
 </script></body></html>'''
 
@@ -710,6 +739,7 @@ def main() -> None:
     parser.add_argument("--m1-state", required=True, type=Path)
     parser.add_argument("--m4-host", default="webpro@192.168.1.203")
     parser.add_argument("--m4-state", required=True)
+    parser.add_argument("--crawler-config", type=Path, default=Path(__file__).with_name("crawler-servers.json"))
     parser.add_argument("--crawler-host", default="gcloud")
     parser.add_argument("--crawler-input", default="~/crawler/data/m1-input-last-100k.txt")
     parser.add_argument("--crawler-results", default="~/crawler/data/company-extractor-last-100k.jsonl")

@@ -80,12 +80,9 @@ if [[ -z "$MACHINE" ]]; then MACHINE="$JOB"; fi
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/company-extractor-build.XXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
-echo "Building Linux amd64 extractor..."
-(cd "$ROOT_DIR" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$BUILD_DIR/company-extractor" ./tools/company-extractor)
-
 REMOTE_HOME="$(ssh "$HOST" 'printf %s "$HOME"')"
 if [[ "$REMOTE_ROOT" == "~/"* ]]; then
-  REMOTE_ROOT="$REMOTE_HOME/${REMOTE_ROOT#~/}"
+  REMOTE_ROOT="$REMOTE_HOME/${REMOTE_ROOT#\~/}"
 fi
 
 INPUT_REMOTE="$REMOTE_ROOT/data/$JOB.input.txt"
@@ -94,6 +91,21 @@ STATE_REMOTE="$REMOTE_ROOT/data/$JOB.state.json"
 LOG_REMOTE="$REMOTE_ROOT/logs/$JOB.log"
 RUNNER_REMOTE="$REMOTE_ROOT/bin/batch_runner.py"
 BINARY_REMOTE="$REMOTE_ROOT/bin/company-extractor"
+
+GO_BIN="${GO_BIN:-$(command -v go || true)}"
+if [[ -z "$GO_BIN" && -x /opt/homebrew/bin/go ]]; then GO_BIN=/opt/homebrew/bin/go; fi
+if [[ -z "$GO_BIN" && -x /usr/local/go/bin/go ]]; then GO_BIN=/usr/local/go/bin/go; fi
+if [[ -n "$GO_BIN" ]]; then
+  echo "Building Linux amd64 extractor..."
+  (cd "$ROOT_DIR" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -o "$BUILD_DIR/company-extractor" ./tools/company-extractor)
+elif ssh "$HOST" "test -x '$BINARY_REMOTE'"; then
+  echo "Local Go toolchain unavailable; reusing the verified remote Go binary."
+  scp "$HOST:$BINARY_REMOTE" "$BUILD_DIR/company-extractor"
+  chmod 755 "$BUILD_DIR/company-extractor"
+else
+  echo "Go is not installed and no verified remote binary exists; set GO_BIN=/path/to/go" >&2
+  exit 1
+fi
 
 echo "Preparing $HOST..."
 ssh "$HOST" "mkdir -p '$REMOTE_ROOT/data' '$REMOTE_ROOT/logs' '$REMOTE_ROOT/bin'"
