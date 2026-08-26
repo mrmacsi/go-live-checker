@@ -76,6 +76,10 @@ var blockedGreenhouseHosts = map[string]bool{
 	"api.greenhouse.io":        true,
 }
 
+var blockedGreenhouseSegments = map[string]bool{
+	"ai_opt_out_request": true,
+}
+
 var blockedTeamtailorSubdomains = map[string]bool{
 	"www": true, "app": true, "api": true, "login": true, "admin": true,
 	"career": true, "docs": true, "support": true, "status": true,
@@ -835,7 +839,7 @@ func atsMatch(raw string) map[string]string {
 	if blockedGreenhouseHosts[host] {
 		return nil
 	}
-	if (host == "boards.greenhouse.io" || host == "job-boards.greenhouse.io" || strings.HasSuffix(host, ".greenhouse.io")) && len(segments) > 0 && segments[0] != "embed" {
+	if (host == "boards.greenhouse.io" || host == "job-boards.greenhouse.io" || strings.HasSuffix(host, ".greenhouse.io")) && len(segments) > 0 && segments[0] != "embed" && !blockedGreenhouseSegments[strings.ToLower(segments[0])] {
 		return result("greenhouse", segments[0])
 	}
 	if host == "apply.careers.microsoft.com" || host == "explore.jobs.netflix.net" {

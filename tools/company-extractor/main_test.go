@@ -128,6 +128,7 @@ func TestATSMatchSupportsEightfoldAndRejectsFalseBoards(t *testing.T) {
 	}
 	for _, input := range []string{
 		"https://www.greenhouse.io/de",
+		"https://s101.recruiting.eu.greenhouse.io/ai_opt_out_request/job_post/4825124101/ai_opt_out",
 		"https://tt.teamtailor.com/",
 		"https://careers.microsoft.com/",
 	} {
