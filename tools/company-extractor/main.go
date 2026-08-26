@@ -86,6 +86,20 @@ var blockedTeamtailorSubdomains = map[string]bool{
 	"trust": true, "tt": true,
 }
 
+var blockedATSSubdomains = map[string]map[string]bool{
+	"bamboohr.com":        {"www": true, "app": true, "api": true, "login": true, "resources": true, "cdn": true},
+	"pinpointhq.com":      {"www": true, "app": true, "apply": true, "api": true, "developers": true},
+	"recruitee.com":       {"www": true, "app": true, "api": true, "status": true, "support": true},
+	"breezy.hr":           {"www": true, "app": true, "api": true, "status": true, "support": true, "m": true},
+	"careers.hibob.com":   {"www": true, "app": true},
+	"livevacancies.co.uk": {"www": true, "app": true},
+	"softgarden.io":       {"www": true, "app": true, "api": true, "login": true, "docs": true, "support": true, "status": true},
+	"hire.trakstar.com":   {"www": true, "app": true, "api": true, "status": true, "support": true},
+	"talent-soft.com":     {"www": true, "app": true, "api": true, "login": true, "support": true},
+	"ttcportals.com":      {"www": true, "app": true, "api": true, "login": true, "support": true},
+	"schoolrecruiter.com": {"www": true, "app": true, "api": true, "login": true, "support": true},
+}
+
 var junkEmailExact = map[string]bool{
 	"email@email.com": true, "email@email.co.uk": true, "email@mail.com": true,
 	"admin@admin.com": true, "john@doe.com": true, "jane@doe.com": true,
@@ -869,8 +883,11 @@ func atsMatch(raw string) map[string]string {
 	providers := []struct{ suffix, name string }{{".teamtailor.com", "teamtailor"}, {".bamboohr.com", "bamboohr"}, {".pinpointhq.com", "pinpoint"}, {".recruitee.com", "recruitee"}, {".breezy.hr", "breezy"}, {".careers.hibob.com", "hibob"}, {".livevacancies.co.uk", "hireful"}, {".softgarden.io", "softgarden"}, {".hire.trakstar.com", "trakstar"}, {".talent-soft.com", "talent_soft"}, {".ttcportals.com", "ttcportals"}, {".schoolrecruiter.com", "schoolrecruiter"}}
 	for _, provider := range providers {
 		if strings.HasSuffix(host, provider.suffix) && host != strings.TrimPrefix(provider.suffix, ".") {
+			subdomain := strings.TrimSuffix(host, provider.suffix)
+			if blocked := blockedATSSubdomains[strings.TrimPrefix(provider.suffix, ".")]; blocked[subdomain] {
+				return nil
+			}
 			if provider.name == "teamtailor" {
-				subdomain := strings.TrimSuffix(host, provider.suffix)
 				if blockedTeamtailorSubdomains[subdomain] {
 					return nil
 				}
