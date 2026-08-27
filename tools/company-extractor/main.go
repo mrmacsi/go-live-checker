@@ -13,9 +13,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -56,6 +58,68 @@ var (
 	dudaAPIRE        = regexp.MustCompile(`(?i)\b(?:window\.)?dmapi\b`)
 	dudaRuntimeRE    = regexp.MustCompile(`(?i)\b(?:dmcore|dmx|dmmobile|dmroot|duda(?:-site|-runtime)?)\b`)
 )
+
+var fallbackDNSResolvers = []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
+
+func lookupWithFallback(ctx context.Context, host string) ([]string, error) {
+	addresses, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err == nil || isDNSNotFound(err) {
+		return addresses, err
+	}
+	for _, server := range fallbackDNSResolvers {
+		dnsServer := server
+		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(dialCtx, network, dnsServer)
+			},
+		}
+		addresses, fallbackErr := resolver.LookupHost(ctx, host)
+		if fallbackErr == nil || isDNSNotFound(fallbackErr) {
+			return addresses, fallbackErr
+		}
+	}
+	return nil, err
+}
+
+func isDNSNotFound(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
+}
+
+func dialWithDNSFallback(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || net.ParseIP(host) != nil {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	// Preserve the fast standard path. Public DNS is consulted only when the
+	// system dial fails with a transient DNS error; doing a LookupHost before
+	// every connection needlessly halves throughput on large queues.
+	conn, dialErr := (&net.Dialer{}).DialContext(ctx, network, address)
+	if dialErr == nil {
+		return conn, nil
+	}
+	var dnsErr *net.DNSError
+	if !errors.As(dialErr, &dnsErr) || dnsErr.IsNotFound {
+		return nil, dialErr
+	}
+	addresses, err := lookupWithFallback(ctx, host)
+	if err != nil {
+		return nil, dialErr
+	}
+	var lastErr error
+	for _, resolved := range addresses {
+		conn, dialErr := (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(resolved, port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no addresses for %s", host)
+}
 
 var domainBrokerHosts = map[string]bool{
 	"sedo.com": true, "sedoparking.com": true, "dan.com": true, "afternic.com": true,
@@ -175,6 +239,7 @@ func getHTTPClient() *http.Client {
 	httpClientOnce.Do(func() {
 		transport := &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			DialContext:     dialWithDNSFallback,
 			// Keep enough idle connections for high worker counts while retaining
 			// the per-host cap that prevents a single site from being flooded.
 			MaxIdleConns:        512,
@@ -189,7 +254,18 @@ func getHTTPClient() *http.Client {
 		if fetchConfig.Proxy != nil {
 			transport.Proxy = http.ProxyURL(fetchConfig.Proxy)
 		}
-		sharedHTTPClient = &http.Client{Timeout: 15 * time.Second, Transport: transport}
+		sharedHTTPClient = &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// Preserve the last 3xx response instead of turning a redirect
+				// loop into a false inactive result.
+				if len(via) >= 10 {
+					return http.ErrUseLastResponse
+				}
+				return nil
+			},
+		}
 	})
 	return sharedHTTPClient
 }
@@ -388,6 +464,9 @@ func structuredAppend(result map[string]interface{}, key string, values ...strin
 	result[key] = append(current, values...)
 }
 func structuredStrings(value interface{}) []string {
+	if list, ok := value.([]string); ok {
+		return list
+	}
 	if list, ok := value.([]interface{}); ok {
 		out := []string{}
 		for _, item := range list {
@@ -401,6 +480,17 @@ func structuredStrings(value interface{}) []string {
 		return []string{text}
 	}
 	return nil
+}
+
+func firstNonEmpty(values ...[]string) string {
+	for _, list := range values {
+		for _, value := range list {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
 }
 func structuredWalk(value interface{}, result map[string]interface{}) {
 	switch item := value.(type) {
@@ -697,7 +787,7 @@ func browserFetch(raw string, timeout time.Duration) FetchResult {
 	return FetchResult{Status: decoded.Status, FinalURL: stripDefaultPort(decoded.FinalURL), Body: decoded.HTML, Err: fetchErr, Via: "browser", Attempts: []map[string]interface{}{{"via": "browser", "status": statusOrNil(decoded.Status), "error": errorOrNil(fetchErr)}}}
 }
 
-func fetchHTTP(raw string, timeout time.Duration) FetchResult {
+func fetchHTTP(raw string, timeout time.Duration, freshConnection bool) FetchResult {
 	if httpSlots != nil {
 		httpSlots <- struct{}{}
 		defer func() { <-httpSlots }()
@@ -713,6 +803,9 @@ func fetchHTTP(raw string, timeout time.Duration) FetchResult {
 	request.Header.Set("User-Agent", userAgents[0])
 	request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	request.Header.Set("Accept-Language", "en-GB,en;q=0.9")
+	if freshConnection {
+		request.Close = true
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		result := FetchResult{FinalURL: raw, Err: err, Via: map[bool]string{true: "proxy", false: "server"}[fetchConfig.Proxy != nil]}
@@ -737,14 +830,16 @@ func fetchHTTP(raw string, timeout time.Duration) FetchResult {
 func retryableFetch(result FetchResult) bool {
 	if result.Err != nil {
 		message := strings.ToLower(result.Err.Error())
-		for _, marker := range []string{"timeout", "deadline exceeded", "eof", "connection reset", "connection refused", "temporary", "tls handshake"} {
+		for _, marker := range []string{"timeout", "deadline exceeded", "eof", "connection reset", "connection refused", "temporary", "tls handshake", "remote error: tls", "tls:", "operation timed out"} {
 			if strings.Contains(message, marker) {
 				return true
 			}
 		}
 		return false
 	}
-	return result.Status == 408 || result.Status == 425 || result.Status == 429 || result.Status == 500 || result.Status == 502 || result.Status == 503 || result.Status == 504
+	// A real HTTP response is already useful liveness evidence. Do not spend
+	// another request retrying a status response in the same pass.
+	return false
 }
 
 func httpFallbackURL(raw string, result FetchResult) (string, bool) {
@@ -782,7 +877,15 @@ func fetchPage(raw string, timeout time.Duration) FetchResult {
 	var result FetchResult
 	attemptHistory := []map[string]interface{}{}
 	for attempt := 0; attempt < attempts; attempt++ {
-		result = fetchHTTP(raw, timeout)
+		attemptTimeout := timeout
+		if attempt > 0 {
+			// Keep the retry bounded: the first attempt gets the configured
+			// timeout, while the retry is capped at four seconds.
+			if attemptTimeout > 4*time.Second {
+				attemptTimeout = 4 * time.Second
+			}
+		}
+		result = fetchHTTP(raw, attemptTimeout, attempt > 0)
 		attemptHistory = append(attemptHistory, result.Attempts...)
 		if !retryableFetch(result) || attempt+1 == attempts {
 			break
@@ -795,7 +898,11 @@ func fetchPage(raw string, timeout time.Duration) FetchResult {
 	}
 	result.Attempts = attemptHistory
 	if fallbackURL, ok := httpFallbackURL(raw, result); ok {
-		fallback := fetchHTTP(fallbackURL, timeout)
+		fallbackTimeout := timeout
+		if fallbackTimeout > 3*time.Second {
+			fallbackTimeout = 3 * time.Second
+		}
+		fallback := fetchHTTP(fallbackURL, fallbackTimeout, true)
 		attemptHistory = append(attemptHistory, fallback.Attempts...)
 		if fallback.Status != 0 || fallback.Err == nil {
 			result = fallback
@@ -959,6 +1066,10 @@ func jsonValue(value interface{}) interface{} {
 	return string(encoded)
 }
 
+func activeHTTPStatus(status int) bool {
+	return (status >= http.StatusOK && status < http.StatusBadRequest) || status == http.StatusUnauthorized || status == http.StatusForbidden
+}
+
 func extractOne(raw string, timeout time.Duration, recursive bool) map[string]interface{} {
 	started := time.Now()
 	fetched := fetchPage(raw, timeout)
@@ -1076,7 +1187,19 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 	if strings.HasSuffix(host, ".uk") {
 		location = "GB"
 	}
-	active := fetchErr == nil && detectActive(body, page)
+	// Receiving a valid web response is proof of a live HTTP service even when
+	// the body is truncated or malformed. Keep content-based detection for
+	// normal responses, but do not turn a 2xx/3xx/401/403 into inactive merely
+	// because body reading or HTML parsing failed afterward.
+	active := false
+	if status != 0 {
+		// Once an HTTP status is available, trust the status class rather than
+		// page text. Error pages can contain words that make content detection
+		// look like a live company site.
+		active = activeHTTPStatus(status)
+	} else if fetchErr == nil {
+		active = detectActive(body, page)
+	}
 	active = active && !hosting
 	websitePlatform, websitePlatforms := detectWebsitePlatforms(body)
 	postcodes, registrations := getPostcodes(page.Text), getRegistrationNumbers(page.Text)
@@ -1086,7 +1209,11 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 	if len(ats) > 0 {
 		bestATS = ats[0]
 	}
-	identity := map[string]interface{}{"legal_names": structuredStrings(page.Structured["legal_names"]), "limited_company_names": limited, "trading_names": structuredStrings(page.Structured["alternate_names"]), "company_numbers": registrations, "postcodes": postcodes, "towns": structuredStrings(page.Structured["towns"]), "addresses": structuredStrings(page.Structured["addresses"]), "structured_names": structuredStrings(page.Structured["names"]), "structured_data_types": structuredStrings(page.Structured["types"]), "structured_data_present": true, "footer_evidence": strings.Contains(strings.ToLower(page.FooterText), "copyright"), "legal_page_evidence": false, "pages_inspected": []string{finalURL}, "page_kinds": []string{}}
+	legalNames := structuredStrings(page.Structured["legal_names"])
+	structuredNames := structuredStrings(page.Structured["names"])
+	tradingNames := structuredStrings(page.Structured["alternate_names"])
+	companyName := firstNonEmpty(legalNames, structuredNames, tradingNames, limited)
+	identity := map[string]interface{}{"company_name": nilString(companyName), "legal_names": legalNames, "limited_company_names": limited, "trading_names": tradingNames, "company_numbers": registrations, "postcodes": postcodes, "towns": structuredStrings(page.Structured["towns"]), "addresses": structuredStrings(page.Structured["addresses"]), "structured_names": structuredNames, "structured_data_types": structuredStrings(page.Structured["types"]), "structured_data_present": true, "footer_evidence": strings.Contains(strings.ToLower(page.FooterText), "copyright"), "legal_page_evidence": false, "pages_inspected": []string{finalURL}, "page_kinds": []string{}}
 	description := ""
 	if parsed := parseURL(finalURL); parsed != nil && (parsed.Path == "" || parsed.Path == "/") {
 		parts := []string{}
@@ -1105,7 +1232,7 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 	if status == http.StatusOK {
 		atsTraceable = len(bestATS) > 0
 	}
-	detail := map[string]interface{}{"website": nilString(finalURL), "active": active, "hosting": hosting, "location": nilString(location), "website_language": nilString(language), "logo_link": nilString(firstImage(page.Images, finalURL)), "twitter": nilString(social["twitter_link"]), "facebook": nilString(social["facebook_link"]), "linkedin": nilString(social["linkedin_link"]), "instagram": nilString(social["instagram_link"]), "youtube": nilString(social["youtube_link"]), "tiktok": nilString(social["tiktok_link"]), "contact_page": nilString(pageLinks["contact_page_link"]), "careers_page": nilString(pageLinks["careers_page_link"]), "vacancies_page": nilString(pageLinks["vacancies_page_link"]), "ats_page": nilString(bestATS["url"]), "terms_conditions_page": nilString(pageLinks["terms_and_conditions_page_link"]), "privacy_page": nilString(pageLinks["privacy_policy_page_link"]), "company_description": nilString(description), "email": joinValues(emailsFound, "email"), "email_protected": strings.Contains(strings.ToLower(page.Text), "[email protected]"), "phone": joinValues(phonesFound, "number"), "new_emails": nilSlice(emailsFound), "new_phones": nilSlice(phonesFound), "extra_info": jsonValue(extra), "ats_traceable": atsTraceable}
+	detail := map[string]interface{}{"website": nilString(finalURL), "active": active, "hosting": hosting, "location": nilString(location), "website_language": nilString(language), "logo_link": nilString(firstImage(page.Images, finalURL)), "twitter": nilString(social["twitter_link"]), "facebook": nilString(social["facebook_link"]), "linkedin": nilString(social["linkedin_link"]), "instagram": nilString(social["instagram_link"]), "youtube": nilString(social["youtube_link"]), "tiktok": nilString(social["tiktok_link"]), "contact_page": nilString(pageLinks["contact_page_link"]), "careers_page": nilString(pageLinks["careers_page_link"]), "vacancies_page": nilString(pageLinks["vacancies_page_link"]), "ats_page": nilString(bestATS["url"]), "terms_conditions_page": nilString(pageLinks["terms_and_conditions_page_link"]), "privacy_page": nilString(pageLinks["privacy_policy_page_link"]), "company_name": nilString(companyName), "company_description": nilString(description), "email": joinValues(emailsFound, "email"), "email_protected": strings.Contains(strings.ToLower(page.Text), "[email protected]"), "phone": joinValues(phonesFound, "number"), "new_emails": nilSlice(emailsFound), "new_phones": nilSlice(phonesFound), "extra_info": jsonValue(extra), "ats_traceable": atsTraceable}
 	meta := map[string]interface{}{"input_url": raw, "final_url": finalURL, "http_status": statusOrNil(status), "fetch_time_sec": time.Since(started).Seconds(), "job_category_hint": 11, "ats_provider": nilString(bestATS["provider"]), "ats_identifier": nilString(bestATS["identifier"]), "ats_candidates": ats, "error": errorOrNil(fetchErr), "fetch_via": fetched.Via, "fetch_attempts": fetched.Attempts, "truncated": false, "website_platform": nilString(websitePlatform), "website_platforms": websitePlatforms, "limited_company": firstOrNil(limited), "identity_evidence": identity, "external_ats_identity_rejections": []interface{}{}}
 	return map[string]interface{}{"meta": meta, "company_detail": detail}
 }

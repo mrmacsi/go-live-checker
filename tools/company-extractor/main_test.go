@@ -74,8 +74,8 @@ func TestDetectWebsitePlatforms(t *testing.T) {
 }
 
 func TestRetryableFetch(t *testing.T) {
-	if !retryableFetch(FetchResult{Status: 429}) {
-		t.Fatal("429 should be retried")
+	if retryableFetch(FetchResult{Status: 429}) {
+		t.Fatal("HTTP status responses should not be retried in the same pass")
 	}
 	if !retryableFetch(FetchResult{Err: temporaryTestError("connection reset by peer")}) {
 		t.Fatal("connection reset should be retried")
@@ -92,6 +92,22 @@ func TestHTTPFallbackURL(t *testing.T) {
 	}
 	if _, ok := httpFallbackURL("https://example.co.uk", FetchResult{Err: temporaryTestError("no such host")}); ok {
 		t.Fatal("DNS failures should not trigger HTTP fallback")
+	}
+	if _, ok := httpFallbackURL("https://example.co.uk", FetchResult{Err: temporaryTestError("context deadline exceeded")}); ok {
+		t.Fatal("timeouts should not trigger a full HTTP fallback attempt")
+	}
+}
+
+func TestActiveHTTPStatus(t *testing.T) {
+	for _, status := range []int{200, 201, 204, 301, 302, 307, 401, 403} {
+		if !activeHTTPStatus(status) {
+			t.Fatalf("%d should be active", status)
+		}
+	}
+	for _, status := range []int{0, 400, 404, 429, 500, 502, 503, 504} {
+		if activeHTTPStatus(status) {
+			t.Fatalf("%d should not be active", status)
+		}
 	}
 }
 
