@@ -21,6 +21,31 @@ func TestDetectHosting(t *testing.T) {
 	}
 }
 
+func TestLimitedCompanyEvidenceRanksRepeatedNames(t *testing.T) {
+	text := `better!” Elliot Cargill Charlton Baker Ltd
+	 time.” Paul Zietsman Burton Beavon LTD
+	 is operated by Bright SG Ltd
+	 or licensed to Bright SG Ltd
+	 date and correct, Bright SG Ltd
+	 to your locality. Bright SG Ltd
+	 with their operators. Bright SG Ltd
+	 content on it. Bright SG Ltd
+	 July 2024 © Bright SG Ltd
+	 applicable law, including but not limited`
+	evidence := limitedCompanyEvidenceFromText(text)
+	if len(evidence.Names) == 0 || evidence.Names[0] != "Bright SG Ltd" {
+		t.Fatalf("limited company ranking = %#v, want Bright SG Ltd first", evidence.Names)
+	}
+	if evidence.Counts[0]["count"] != 7 {
+		t.Fatalf("Bright SG Ltd count = %#v, want 7", evidence.Counts[0]["count"])
+	}
+	for _, name := range evidence.Names {
+		if name == "including but not limited" {
+			t.Fatal("boilerplate phrase was treated as a company name")
+		}
+	}
+}
+
 func TestDetectWebsitePlatforms(t *testing.T) {
 	tests := []struct {
 		name, body, finalURL, primary string

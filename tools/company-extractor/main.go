@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	xhtml "golang.org/x/net/html"
 )
@@ -1023,18 +1024,117 @@ func atsMatch(raw string) map[string]string {
 	return nil
 }
 
-func limitedCompanyNames(text string) []string {
-	names := []string{}
-	for _, match := range limitedRE.FindAllStringIndex(text, -1) {
-		prefix := strings.Fields(text[:match[0]])
-		if len(prefix) > 5 {
-			prefix = prefix[len(prefix)-5:]
-		}
-		if len(prefix) > 0 {
-			names = append(names, strings.TrimSpace(strings.Join(append(prefix, text[match[0]:match[1]]), " ")))
-		}
+var limitedContextWords = map[string]bool{
+	"a": true, "an": true, "and": true, "are": true, "as": true, "at": true,
+	"be": true, "being": true, "by": true, "but": true, "changes": true,
+	"content": true, "correct": true, "date": true, "for": true, "from": true,
+	"including": true, "in": true, "is": true, "it": true, "its": true,
+	"law": true, "licensed": true, "not": true, "of": true, "on": true,
+	"operated": true, "or": true, "our": true, "terms": true, "that": true,
+	"the": true, "their": true, "this": true, "to": true, "was": true,
+	"were": true, "which": true, "with": true, "written": true, "your": true,
+}
+
+type limitedCompanyEvidence struct {
+	Names  []string
+	Counts []map[string]interface{}
+}
+
+func normalizedLimitedName(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, " \t\r\n,.;:|\"'“”‘’()[]{}<>©")
+	return strings.TrimSpace(spaceRE.ReplaceAllString(value, " "))
+}
+
+func companyWord(value string) bool {
+	value = strings.Trim(value, " \t\r\n,.;:|\"'“”‘’()[]{}<>©")
+	if value == "" {
+		return false
 	}
-	return uniqFold(names, 25)
+	runes := []rune(value)
+	return unicode.IsUpper(runes[0]) || unicode.IsDigit(runes[0]) || strings.ToUpper(value) == value
+}
+
+func limitedCandidate(before, suffix string) string {
+	// A legal-form word is often preceded by boilerplate such as "operated by"
+	// or "including but not". Start after the nearest sentence/HTML boundary,
+	// then discard leading context words while retaining the name itself.
+	// If the page has flattened adjacent text nodes without punctuation, also
+	// start after the previous legal-form match so two nearby names do not get
+	// concatenated into one candidate.
+	if matches := limitedRE.FindAllStringIndex(before, -1); len(matches) > 0 {
+		before = before[matches[len(matches)-1][1]:]
+	}
+	if index := strings.LastIndexAny(before, ".!?;:()[]{}<>©|,\"'“”‘’"); index >= 0 {
+		before = before[index+1:]
+	}
+	words := strings.Fields(before)
+	if len(words) > 8 {
+		words = words[len(words)-8:]
+	}
+	words = append(words, suffix)
+	start := 0
+	for start < len(words)-1 && limitedContextWords[strings.ToLower(strings.Trim(words[start], ",.;:|\"'“”‘’()[]{}<>©"))] {
+		start++
+	}
+	// Lowercase prose immediately followed by a title-cased word is usually
+	// the tail of the sentence, not part of the company name.
+	for start < len(words)-1 && !companyWord(words[start]) && companyWord(words[start+1]) {
+		start++
+	}
+	if start >= len(words)-1 {
+		return ""
+	}
+	return normalizedLimitedName(strings.Join(words[start:], " "))
+}
+
+func limitedCompanyEvidenceFromText(text string) limitedCompanyEvidence {
+	type counted struct {
+		name  string
+		count int
+		first int
+	}
+	byKey := map[string]*counted{}
+	for position, match := range limitedRE.FindAllStringIndex(text, -1) {
+		name := limitedCandidate(text[:match[0]], text[match[0]:match[1]])
+		parts := strings.Fields(name)
+		if len(parts) < 2 {
+			continue
+		}
+		key := strings.ToLower(strings.Join(parts, " "))
+		if strings.Contains(key, "not limited") || strings.Contains(key, "limited to") || strings.Contains(key, "limited liability") {
+			continue
+		}
+		item := byKey[key]
+		if item == nil {
+			item = &counted{name: name, first: position}
+			byKey[key] = item
+		}
+		item.count++
+	}
+	all := make([]*counted, 0, len(byKey))
+	for _, item := range byKey {
+		all = append(all, item)
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].count != all[j].count {
+			return all[i].count > all[j].count
+		}
+		return all[i].first < all[j].first
+	})
+	if len(all) > 25 {
+		all = all[:25]
+	}
+	evidence := limitedCompanyEvidence{Names: make([]string, 0, len(all)), Counts: make([]map[string]interface{}, 0, len(all))}
+	for _, item := range all {
+		evidence.Names = append(evidence.Names, item.name)
+		evidence.Counts = append(evidence.Counts, map[string]interface{}{"name": item.name, "count": item.count})
+	}
+	return evidence
+}
+
+func limitedCompanyNames(text string) []string {
+	return limitedCompanyEvidenceFromText(text).Names
 }
 func joinValues(values []map[string]interface{}, key string) interface{} {
 	out := []string{}
@@ -1204,7 +1304,8 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 	websitePlatform, websitePlatforms := detectWebsitePlatforms(body)
 	postcodes, registrations := getPostcodes(page.Text), getRegistrationNumbers(page.Text)
 	extra := map[string]interface{}{"post_code": postcodes, "company_number": registrations}
-	limited := limitedCompanyNames(page.Text)
+	limitedEvidence := limitedCompanyEvidenceFromText(page.Text)
+	limited := limitedEvidence.Names
 	bestATS := map[string]string{}
 	if len(ats) > 0 {
 		bestATS = ats[0]
@@ -1213,7 +1314,7 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 	structuredNames := structuredStrings(page.Structured["names"])
 	tradingNames := structuredStrings(page.Structured["alternate_names"])
 	companyName := firstNonEmpty(legalNames, structuredNames, tradingNames, limited)
-	identity := map[string]interface{}{"company_name": nilString(companyName), "legal_names": legalNames, "limited_company_names": limited, "trading_names": tradingNames, "company_numbers": registrations, "postcodes": postcodes, "towns": structuredStrings(page.Structured["towns"]), "addresses": structuredStrings(page.Structured["addresses"]), "structured_names": structuredNames, "structured_data_types": structuredStrings(page.Structured["types"]), "structured_data_present": true, "footer_evidence": strings.Contains(strings.ToLower(page.FooterText), "copyright"), "legal_page_evidence": false, "pages_inspected": []string{finalURL}, "page_kinds": []string{}}
+	identity := map[string]interface{}{"company_name": nilString(companyName), "legal_names": legalNames, "limited_company_names": limited, "limited_company_name_counts": limitedEvidence.Counts, "trading_names": tradingNames, "company_numbers": registrations, "postcodes": postcodes, "towns": structuredStrings(page.Structured["towns"]), "addresses": structuredStrings(page.Structured["addresses"]), "structured_names": structuredNames, "structured_data_types": structuredStrings(page.Structured["types"]), "structured_data_present": true, "footer_evidence": strings.Contains(strings.ToLower(page.FooterText), "copyright"), "legal_page_evidence": false, "pages_inspected": []string{finalURL}, "page_kinds": []string{}}
 	description := ""
 	if parsed := parseURL(finalURL); parsed != nil && (parsed.Path == "" || parsed.Path == "/") {
 		parts := []string{}
