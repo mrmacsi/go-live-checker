@@ -77,3 +77,39 @@ The collect step verifies each downloaded JSONL with SHA-256 before deleting
 the corresponding VM. It refuses to delete incomplete jobs unless
 `--force` is explicitly supplied. A failed launch can reuse its already-made
 split with `--reuse-input`.
+
+### Launch a complete domain file
+
+For a new file such as a 5-million-domain queue, use `--input` and set the
+number of servers explicitly. The file is counted once, split into balanced
+newline-preserving parts, copied to the VMs, and started automatically. The
+source file is not changed. Dashboard entries and a manifest are written for
+each shard:
+
+```bash
+python3 tools/company-extractor/gcp_batch.py launch \
+  --input /absolute/path/domains.txt \
+  --batch-id ct-nominet-5m-20260827 \
+  --servers 10 \
+  --machine-type c3-highcpu-4 \
+  --zone europe-west2-b \
+  --workers 128 \
+  --timeout 8 \
+  --attempts 2 \
+  --batch-size 2000
+```
+
+If the file contains 5,000,000 domains and `--servers 10`, each server gets
+500,000 domains. If the total is not evenly divisible, the first shards get
+one extra line. The local manifest and split files are stored under
+`company-extractor/live-dashboard/batches/<batch-id>/`.
+
+The original queue-tail behavior remains available with `--queue --tail`.
+Use a unique `--batch-id`; the launcher refuses to overwrite an existing
+manifest. To collect verified JSONL results and delete the VMs after all
+shards finish:
+
+```bash
+python3 tools/company-extractor/gcp_batch.py collect-destroy \
+  --batch-id ct-nominet-5m-20260827
+```
