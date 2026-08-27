@@ -24,6 +24,7 @@ PROJECT = "contentpulse-vertex-ai"
 ACCOUNT = "contentpulseio@gmail.com"
 DEFAULT_ZONE = "europe-west2-b"
 DEFAULT_TYPE = "c3-highcpu-4"
+MAX_INSTANCES_PER_ZONE = 8
 M1_AGENT = Path.home() / "Library/LaunchAgents/com.sponsorcompanies.m1-runner.plist"
 
 
@@ -88,6 +89,25 @@ def split_file(source: Path, parts_dir: Path, expected_sizes: list[int]) -> list
     return parts
 
 
+def assign_zones(zone_spec: str, servers: int) -> tuple[list[str], list[str]]:
+    """Assign consecutive groups of at most eight VMs to each zone."""
+    zones = []
+    for value in zone_spec.split(","):
+        zone = value.strip()
+        if zone and zone not in zones:
+            zones.append(zone)
+    if not zones:
+        raise SystemExit("at least one zone is required")
+    capacity = len(zones) * MAX_INSTANCES_PER_ZONE
+    if servers > capacity:
+        raise SystemExit(
+            f"{servers} servers require at least {((servers + MAX_INSTANCES_PER_ZONE - 1) // MAX_INSTANCES_PER_ZONE)} zones; "
+            f"only {len(zones)} zone(s) supplied (capacity {capacity})"
+        )
+    assignments = [zones[index // MAX_INSTANCES_PER_ZONE] for index in range(servers)]
+    return zones, assignments
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("launch", "collect-destroy"))
@@ -97,10 +117,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tail", type=int, help="number of domains to take from --queue (default: 500000)")
     parser.add_argument("--servers", type=int, default=4)
     parser.add_argument("--machine-type", default=DEFAULT_TYPE)
-    parser.add_argument("--zone", default=DEFAULT_ZONE)
+    parser.add_argument("--zone", default=DEFAULT_ZONE, help="zone name or comma-separated zones; max 8 VMs per zone")
     parser.add_argument(
         "--zones",
-        help="comma-separated zones to distribute instances across (overrides --zone)",
+        help="comma-separated zones to use in groups of 8 (overrides --zone)",
     )
     parser.add_argument("--workers", type=int, default=128)
     parser.add_argument("--timeout", type=int, default=8)
@@ -198,11 +218,9 @@ def launch(args: argparse.Namespace) -> None:
         batch_dir.mkdir(parents=True, exist_ok=True)
     queue = args.queue.resolve() if args.queue is not None else None
     input_path = args.input.resolve() if args.input is not None else None
-    zones = [zone.strip() for zone in (args.zones.split(",") if args.zones else [args.zone]) if zone.strip()]
-    if not zones:
-        raise SystemExit("at least one zone is required")
+    zone_spec = args.zones if args.zones else args.zone
+    zones, instance_zones = assign_zones(zone_spec, args.servers)
     instances = [f"{args.batch_id}-{i:02d}" for i in range(1, args.servers + 1)]
-    instance_zones = [zones[index % len(zones)] for index in range(args.servers)]
     created: list[str] = []
     m1_was_loaded = False
     boot_disk_type = "hyperdisk-balanced" if args.machine_type.startswith("c4-") else "pd-balanced"

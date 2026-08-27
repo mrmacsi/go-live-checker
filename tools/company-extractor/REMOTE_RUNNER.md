@@ -92,7 +92,7 @@ python3 tools/company-extractor/gcp_batch.py launch \
   --batch-id ct-nominet-5m-20260827 \
   --servers 10 \
   --machine-type c3-highcpu-4 \
-  --zone europe-west2-b \
+  --zone europe-west2-b,europe-west1-b \
   --workers 128 \
   --timeout 8 \
   --attempts 2 \
@@ -105,6 +105,11 @@ one extra line. The local manifest and split files are stored under
 `company-extractor/live-dashboard/batches/<batch-id>/`.
 
 The original queue-tail behavior remains available with `--queue --tail`.
+`--zone` accepts one zone or a comma-separated list. The launcher places the
+first eight instances in the first zone, the next eight in the second, and so
+on. It refuses to launch if more than eight instances are requested per
+supplied zone. `--zones` is retained as an equivalent explicit alias for the
+same comma-separated list.
 Use a unique `--batch-id`; the launcher refuses to overwrite an existing
 manifest. To collect verified JSONL results and delete the VMs after all
 shards finish:
