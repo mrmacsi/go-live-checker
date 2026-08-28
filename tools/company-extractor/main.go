@@ -153,7 +153,7 @@ var blockedTeamtailorSubdomains = map[string]bool{
 
 var blockedATSSubdomains = map[string]map[string]bool{
 	"bamboohr.com":        {"www": true, "app": true, "api": true, "login": true, "resources": true, "cdn": true},
-	"pinpointhq.com":      {"www": true, "app": true, "apply": true, "api": true, "developers": true},
+	"pinpointhq.com":      {"www": true, "app": true, "apply": true, "api": true, "developers": true, "trends": true},
 	"recruitee.com":       {"www": true, "app": true, "api": true, "status": true, "support": true},
 	"breezy.hr":           {"www": true, "app": true, "api": true, "status": true, "support": true, "m": true},
 	"careers.hibob.com":   {"www": true, "app": true},
@@ -163,6 +163,13 @@ var blockedATSSubdomains = map[string]map[string]bool{
 	"talent-soft.com":     {"www": true, "app": true, "api": true, "login": true, "support": true},
 	"ttcportals.com":      {"www": true, "app": true, "api": true, "login": true, "support": true},
 	"schoolrecruiter.com": {"www": true, "app": true, "api": true, "login": true, "support": true},
+}
+
+var avatureActionSegments = map[string]bool{
+	"applyflowcheck": true, "applicationform": true, "clinicalquickapply": true,
+	"eventlisting": true, "eventslisting": true, "feed": true, "folderdetail": true,
+	"frontpage": true, "home": true, "jobdetail": true, "joinourpartnership": true, "login": true, "profile": true,
+	"register": true, "searchjobs": true, "talentcommunity": true,
 }
 
 var junkEmailExact = map[string]bool{
@@ -864,6 +871,24 @@ func httpFallbackURL(raw string, result FetchResult) (string, bool) {
 	return "", false
 }
 
+func isAvatureLocale(segment string) bool {
+	if len(segment) != 5 && len(segment) != 2 {
+		return false
+	}
+	for index, value := range segment {
+		if index == 2 {
+			if value != '_' && value != '-' {
+				return false
+			}
+			continue
+		}
+		if (value < 'a' || value > 'z') && (value < 'A' || value > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 func fetchPage(raw string, timeout time.Duration) FetchResult {
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + strings.TrimLeft(raw, "/")
@@ -1013,7 +1038,27 @@ func atsMatch(raw string) map[string]string {
 		return result("rippling", segments[len(segments)-1])
 	}
 	if strings.HasSuffix(host, ".avature.net") && host != "avature.net" {
-		return result("avature", strings.TrimSuffix(host, ".avature.net"))
+		tenant := strings.TrimSuffix(host, ".avature.net")
+		if tenant == "" || strings.Contains(tenant, ".") || tenant == "www" || tenant == "www2" || tenant == "api" || tenant == "static" || tenant == "cdn" || tenant == "assets" {
+			return nil
+		}
+		portalIndex := 0
+		if len(segments) > 0 && isAvatureLocale(segments[0]) {
+			if !strings.EqualFold(segments[0], "en_gb") {
+				return nil
+			}
+			portalIndex = 1
+		}
+		identifier := tenant
+		if len(segments) > portalIndex && !avatureActionSegments[strings.ToLower(segments[portalIndex])] {
+			portal := segments[:minInt(len(segments), 2)]
+			identifier += "/" + strings.Join(portal, "/")
+		}
+		path := ""
+		if len(segments) > 0 {
+			path = "/" + strings.Join(segments, "/")
+		}
+		return map[string]string{"provider": "avature", "identifier": identifier, "url": "https://" + host + path, "raw_url": raw}
 	}
 	if strings.HasSuffix(host, ".icims.com") && len(segments) > 0 && segments[0] == "jobs" {
 		return result("icims", strings.TrimSuffix(host, ".icims.com"))
@@ -1022,6 +1067,148 @@ func atsMatch(raw string) map[string]string {
 		return result("careers_page", segments[0])
 	}
 	return nil
+}
+
+type atsCandidateFetcher func(string, time.Duration) FetchResult
+
+func atsStatusIsLive(status int) bool {
+	return status >= http.StatusOK && status < http.StatusBadRequest
+}
+
+func avatureMeta(body, name string) string {
+	pattern := regexp.MustCompile(`(?is)<meta[^>]+name=["']` + regexp.QuoteMeta(name) + `["'][^>]+content=["']([^"']*)`)
+	match := pattern.FindStringSubmatch(body)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.Trim(strings.TrimSpace(match[1]), "/")
+}
+
+func atsFinalHostMatches(result FetchResult, expected string) bool {
+	finalHost := hostname(result.FinalURL)
+	return finalHost != "" && strings.EqualFold(finalHost, expected)
+}
+
+func atsFinalHostHasSuffix(result FetchResult, suffix string) bool {
+	finalHost := hostname(result.FinalURL)
+	return finalHost != "" && (finalHost == strings.TrimPrefix(suffix, ".") || strings.HasSuffix(finalHost, suffix))
+}
+
+func verifyAvatureCandidate(candidate map[string]string, initial FetchResult, fetch atsCandidateFetcher, timeout time.Duration) (bool, string) {
+	if !atsStatusIsLive(initial.Status) {
+		return false, fmt.Sprintf("HTTP %d", initial.Status)
+	}
+	if !atsFinalHostHasSuffix(initial, ".avature.net") {
+		return false, "redirected off avature.net"
+	}
+	body := initial.Body
+	if locale := avatureMeta(body, "avature.portal.lang"); locale != "" && !strings.EqualFold(locale, "en_gb") {
+		return false, "non-uk avature locale: " + locale
+	}
+	parsed := parseURL(candidate["raw_url"])
+	if parsed == nil {
+		return false, "malformed Avature URL"
+	}
+	segments := []string{}
+	for _, segment := range strings.Split(strings.Trim(parsed.Path, "/"), "/") {
+		if segment != "" {
+			segments = append(segments, segment)
+		}
+	}
+	portalIndex := 0
+	if len(segments) > 0 && isAvatureLocale(segments[0]) {
+		portalIndex = 1
+	}
+	portal := ""
+	if meta := avatureMeta(body, "avature.portal.urlPath"); meta != "" {
+		portal = meta
+	} else if len(segments) > portalIndex {
+		portal = segments[portalIndex]
+	}
+	if portal == "" || avatureActionSegments[strings.ToLower(portal)] {
+		return false, "Avature page has no job-board portal"
+	}
+	searchURL := "https://" + parsed.Hostname() + "/" + portal + "/SearchJobs/"
+	search := fetch(searchURL, timeout)
+	if !atsStatusIsLive(search.Status) {
+		return false, fmt.Sprintf("Avature SearchJobs HTTP %d", search.Status)
+	}
+	if !atsFinalHostHasSuffix(search, ".avature.net") {
+		return false, "Avature SearchJobs redirected off provider"
+	}
+	return true, ""
+}
+
+func verifyATSCandidatesWith(candidates []map[string]string, timeout time.Duration, fetch atsCandidateFetcher) []map[string]string {
+	verified := make([]map[string]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		item := map[string]string{}
+		for key, value := range candidate {
+			item[key] = value
+		}
+		initial := fetch(item["url"], timeout)
+		active := atsStatusIsLive(initial.Status)
+		errorMessage := ""
+		provider := item["provider"]
+		switch provider {
+		case "avature":
+			active, errorMessage = verifyAvatureCandidate(item, initial, fetch, timeout)
+		case "bamboohr":
+			candidateURL := parseURL(item["url"])
+			if candidateURL == nil {
+				active, errorMessage = false, "malformed BambooHR URL"
+				break
+			}
+			probe := fetch("https://"+candidateURL.Hostname()+"/careers/list", timeout)
+			active = atsStatusIsLive(probe.Status) && atsFinalHostMatches(probe, candidateURL.Hostname())
+			if !active {
+				errorMessage = "BambooHR careers endpoint unavailable or redirected"
+			}
+		case "ashby":
+			parts := strings.Split(strings.Trim(item["url"], "/"), "/")
+			org := parts[len(parts)-1]
+			probe := fetch("https://api.ashbyhq.com/posting-api/job-board/"+org, timeout)
+			payload := map[string]interface{}{}
+			decodeErr := json.Unmarshal([]byte(probe.Body), &payload)
+			_, hasJobs := payload["jobs"].([]interface{})
+			active = atsStatusIsLive(probe.Status) && decodeErr == nil && hasJobs
+			if !active {
+				errorMessage = "Ashby posting API unavailable"
+			}
+		case "greenhouse":
+			parts := strings.Split(strings.Trim(item["url"], "/"), "/")
+			board := parts[len(parts)-1]
+			probe := fetch("https://boards-api.greenhouse.io/v1/boards/"+board+"/jobs", timeout)
+			payload := map[string]interface{}{}
+			decodeErr := json.Unmarshal([]byte(probe.Body), &payload)
+			_, hasJobs := payload["jobs"].([]interface{})
+			active = atsStatusIsLive(probe.Status) && decodeErr == nil && hasJobs
+			if !active {
+				errorMessage = "Greenhouse jobs API unavailable"
+			}
+		default:
+			if !active {
+				errorMessage = fmt.Sprintf("HTTP %d", initial.Status)
+			}
+		}
+		item["availability_checked"] = "true"
+		item["http_status"] = strconv.Itoa(initial.Status)
+		if active {
+			item["active"] = "true"
+		} else {
+			item["active"] = "false"
+			if errorMessage == "" {
+				errorMessage = fmt.Sprintf("HTTP %d", initial.Status)
+			}
+			item["error"] = errorMessage
+		}
+		verified = append(verified, item)
+	}
+	return verified
+}
+
+func verifyATSCandidates(candidates []map[string]string, timeout time.Duration) []map[string]string {
+	return verifyATSCandidatesWith(candidates, timeout, fetchPage)
 }
 
 var limitedContextWords = map[string]bool{
@@ -1280,6 +1467,7 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 			ats = append(ats, match)
 		}
 	}
+	ats = verifyATSCandidates(ats, timeout)
 	if recursive {
 		_ = maxPages
 	} // recursive subpage transport is added below the direct parity baseline.
@@ -1307,8 +1495,11 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 	limitedEvidence := limitedCompanyEvidenceFromText(page.Text)
 	limited := limitedEvidence.Names
 	bestATS := map[string]string{}
-	if len(ats) > 0 {
-		bestATS = ats[0]
+	for _, candidate := range ats {
+		if candidate["active"] == "true" {
+			bestATS = candidate
+			break
+		}
 	}
 	legalNames := structuredStrings(page.Structured["legal_names"])
 	structuredNames := structuredStrings(page.Structured["names"])

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestDetectHosting(t *testing.T) {
 	tests := []struct {
@@ -171,6 +174,7 @@ func TestATSMatchSupportsEightfoldAndRejectsFalseBoards(t *testing.T) {
 		"https://www.greenhouse.io/de",
 		"https://s101.recruiting.eu.greenhouse.io/ai_opt_out_request/job_post/4825124101/ai_opt_out",
 		"https://www.bamboohr.com/careers",
+		"https://trends.pinpointhq.com/",
 		"https://api.recruitee.com/",
 		"https://tt.teamtailor.com/",
 		"https://careers.microsoft.com/",
@@ -178,6 +182,68 @@ func TestATSMatchSupportsEightfoldAndRejectsFalseBoards(t *testing.T) {
 		if got := atsMatch(input); got != nil {
 			t.Fatalf("atsMatch(%q) = %#v, want nil", input, got)
 		}
+	}
+}
+
+func TestATSMatchCanonicalizesAvatureActionPages(t *testing.T) {
+	for _, test := range []struct {
+		input, identifier, canonical string
+	}{
+		{
+			input:      "https://specsavers.avature.net/clinicalquickapply",
+			identifier: "specsavers", canonical: "https://specsavers.avature.net/clinicalquickapply",
+		},
+		{
+			input:      "https://specsavers.avature.net/JoinourPartnership",
+			identifier: "specsavers", canonical: "https://specsavers.avature.net/JoinourPartnership",
+		},
+	} {
+		got := atsMatch(test.input)
+		if got == nil || got["provider"] != "avature" || got["identifier"] != test.identifier || got["url"] != test.canonical {
+			t.Fatalf("atsMatch(%q) = %#v", test.input, got)
+		}
+	}
+	normal := atsMatch("https://epic.avature.net/Careers/SearchJobs")
+	if normal == nil || normal["identifier"] != "epic/Careers/SearchJobs" {
+		t.Fatalf("normal Avature match = %#v", normal)
+	}
+}
+
+func TestATSVerificationUsesProviderEndpoints(t *testing.T) {
+	candidates := []map[string]string{
+		atsMatch("https://closed.bamboohr.com/careers/list"),
+		atsMatch("https://jobs.ashbyhq.com/stale"),
+	}
+	responses := map[string]FetchResult{
+		"https://closed.bamboohr.com/":                        {Status: 200, FinalURL: "https://closed.bamboohr.com/", Body: "ok"},
+		"https://closed.bamboohr.com/careers/list":            {Status: 200, FinalURL: "https://www.bamboohr.com/", Body: "closed"},
+		"https://jobs.ashbyhq.com/stale":                      {Status: 200, FinalURL: "https://jobs.ashbyhq.com/stale", Body: "ok"},
+		"https://api.ashbyhq.com/posting-api/job-board/stale": {Status: 404, FinalURL: "https://api.ashbyhq.com/posting-api/job-board/stale", Body: `{}`},
+	}
+	fetch := func(raw string, _ time.Duration) FetchResult { return responses[raw] }
+	verified := verifyATSCandidatesWith(candidates, 0, fetch)
+	for index, candidate := range verified {
+		if candidate["active"] != "false" {
+			t.Fatalf("candidate %d = %#v, want inactive", index, candidate)
+		}
+	}
+}
+
+func TestAvatureActionPageRequiresWorkingSearchEndpoint(t *testing.T) {
+	candidate := atsMatch("https://specsavers.avature.net/clinicalquickapply")
+	responses := map[string]FetchResult{
+		"https://specsavers.avature.net/clinicalquickapply": {
+			Status: 200, FinalURL: "https://specsavers.avature.net/clinicalquickapply",
+			Body: `<meta name="avature.portal.lang" content="en_GB"><meta name="avature.portal.urlPath" content="clinicalquickapply">`,
+		},
+		"https://specsavers.avature.net/clinicalquickapply/SearchJobs/": {
+			Status: 404, FinalURL: "https://specsavers.avature.net/clinicalquickapply/SearchJobs/",
+		},
+	}
+	fetch := func(raw string, _ time.Duration) FetchResult { return responses[raw] }
+	verified := verifyATSCandidatesWith([]map[string]string{candidate}, 0, fetch)
+	if verified[0]["active"] != "false" {
+		t.Fatalf("candidate = %#v, want inactive", verified[0])
 	}
 }
 
