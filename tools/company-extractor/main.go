@@ -145,6 +145,42 @@ var blockedGreenhouseSegments = map[string]bool{
 	"ai_opt_out_request": true,
 }
 
+var atsBlockedFragments = []string{
+	"careers.smartrecruiters.com/yellltd",
+	"jobs.smartrecruiters.com/yellltd",
+	"business.yell.com/features/yell-ads-and-jobs",
+}
+
+var atsPersonioHostRE = regexp.MustCompile(`(?i)^[a-z0-9-]+\.jobs\.personio\.[a-z.]+$`)
+var atsWorkdayLocaleRE = regexp.MustCompile(`(?i)^[a-z]{2}-[a-z]{2}$`)
+var atsAvatureLocaleRE = regexp.MustCompile(`(?i)^[a-z]{2}(?:_[a-z]{2})?$`)
+
+var atsLeverBlockedSegments = map[string]bool{
+	"about": true, "blog": true, "candidate-privacy": true, "careers": true,
+	"contact": true, "cookies": true, "legal": true, "privacy": true,
+	"privacy-policy": true, "resources": true, "security": true, "terms": true,
+}
+
+var atsWorkableBlockedSegments = map[string]bool{
+	"api": true, "app": true, "docs": true, "login": true,
+	"resources": true, "status": true, "support": true,
+}
+
+var atsRipplingLocales = map[string]bool{
+	"en-au": true, "en-gb": true, "en-us": true, "en": true, "fr": true,
+	"fr-fr": true, "de": true, "de-de": true, "es": true, "es-es": true,
+	"it": true, "nl": true, "pt": true, "pt-br": true,
+}
+
+var atsNetworxSuffixes = []string{".current-vacancies.com", ".networxrecruitment.com", ".networxrecruitment.net"}
+var atsNetworxBlockedHosts = map[string]bool{"www": true, "api": true, "utils": true, "static": true, "cdn": true, "images": true}
+var atsPaylocityBoardRoutes = map[string]bool{"all": true, "list": true}
+var atsSmartRecruitersNonBoardSegments = map[string]bool{
+	"api": true, "candidate": true, "embed": true, "job-alert": true, "job-widget": true,
+	"legal": true, "login": true, "resources": true, "static": true, "subscriptions": true,
+}
+var atsAbsURLRE = regexp.MustCompile(`(?i)https?://[^\s"'<>\\)]+`)
+
 var blockedTeamtailorSubdomains = map[string]bool{
 	"www": true, "app": true, "api": true, "login": true, "admin": true,
 	"career": true, "docs": true, "support": true, "status": true,
@@ -872,21 +908,156 @@ func httpFallbackURL(raw string, result FetchResult) (string, bool) {
 }
 
 func isAvatureLocale(segment string) bool {
-	if len(segment) != 5 && len(segment) != 2 {
-		return false
+	return atsAvatureLocaleRE.MatchString(segment)
+}
+
+func isRipplingLocale(segment string) bool {
+	segment = strings.ToLower(segment)
+	if atsRipplingLocales[segment] {
+		return true
 	}
-	for index, value := range segment {
-		if index == 2 {
-			if value != '_' && value != '-' {
-				return false
-			}
-			continue
-		}
-		if (value < 'a' || value > 'z') && (value < 'A' || value > 'Z') {
-			return false
+	return regexp.MustCompile(`(?i)^[a-z]{2}-[a-z]{2}$`).MatchString(segment)
+}
+
+func atsPathSegments(raw string) []string {
+	parsed := parseURL(raw)
+	if parsed == nil {
+		return nil
+	}
+	segments := []string{}
+	for _, value := range strings.Split(strings.Trim(parsed.Path, "/"), "/") {
+		if value != "" {
+			segments = append(segments, value)
 		}
 	}
-	return true
+	return segments
+}
+
+func normalizeATSCandidate(raw string) string {
+	raw = strings.TrimSpace(html.UnescapeString(raw))
+	if raw == "" || strings.HasPrefix(strings.ToLower(raw), "javascript:") || strings.HasPrefix(strings.ToLower(raw), "mailto:") || strings.HasPrefix(strings.ToLower(raw), "tel:") || strings.HasPrefix(raw, "#") {
+		return ""
+	}
+	return strings.TrimRight(raw, ".,;)'\"")
+}
+
+func atsIsBlocked(raw string) bool {
+	needle := strings.ToLower(strings.TrimSpace(raw))
+	if needle == "" {
+		return true
+	}
+	for _, fragment := range atsBlockedFragments {
+		if strings.Contains(needle, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalizeATSURL(raw, provider string) string {
+	parsed := parseURL(raw)
+	if parsed == nil {
+		return raw
+	}
+	host := strings.ToLower(parsed.Hostname())
+	segments := atsPathSegments(raw)
+	path := ""
+	query := ""
+	if len(segments) > 0 {
+		path = "/" + strings.Join(segments, "/")
+	}
+	canonical := func(canonicalHost, canonicalPath, canonicalQuery string) string {
+		result := &url.URL{Scheme: "https", Host: canonicalHost, Path: canonicalPath, RawQuery: canonicalQuery}
+		return result.String()
+	}
+	switch provider {
+	case "ashby":
+		if len(segments) == 0 || strings.EqualFold(segments[0], "embed") || strings.EqualFold(segments[0], "api") {
+			return raw
+		}
+		return canonical(host, "/"+segments[0], "")
+	case "greenhouse":
+		board := ""
+		if len(segments) > 0 {
+			board = segments[0]
+		}
+		if strings.EqualFold(board, "embed") {
+			board = parseURL(raw).Query().Get("for")
+		}
+		if board == "" {
+			return canonical(host, "", "")
+		}
+		return canonical(host, "/"+board, "")
+	case "lever":
+		if host == "api.lever.co" && len(segments) >= 3 && strings.EqualFold(segments[0], "v0") && strings.EqualFold(segments[1], "postings") {
+			return canonical("jobs.lever.co", "/"+segments[2], "")
+		}
+		if len(segments) == 0 {
+			return canonical(host, "", "")
+		}
+		return canonical(host, "/"+segments[0], "")
+	case "eightfold":
+		if path == "" {
+			path = "/careers"
+		}
+		return canonical(host, path, "")
+	case "teamtailor", "bamboohr", "pinpoint", "recruitee", "breezy", "hibob", "hireful", "personio":
+		return canonical(host, "/", "")
+	case "smartrecruiters":
+		index := 0
+		if len(segments) > 0 && strings.EqualFold(segments[0], "ni") {
+			index = 1
+		}
+		if index >= len(segments) {
+			return canonical(host, "", "")
+		}
+		return canonical(host, "/"+segments[index], "")
+	case "workable":
+		if host == "apply.workable.com" && len(segments) > 0 && !strings.EqualFold(segments[0], "j") {
+			return canonical(host, "/"+segments[0], "")
+		}
+		return canonical(host, "/", "")
+	case "jobvite":
+		if len(segments) > 0 {
+			return canonical(host, "/"+segments[0], "")
+		}
+	case "rippling":
+		index := 0
+		if len(segments) > 0 && isRipplingLocale(segments[0]) {
+			index = 1
+		}
+		if index < len(segments) {
+			return canonical(host, "/"+segments[index], "")
+		}
+		return ""
+	case "workday_cxs":
+		if len(segments) == 0 || strings.EqualFold(segments[0], "wday") {
+			return ""
+		}
+		count := 1
+		if atsWorkdayLocaleRE.MatchString(segments[0]) && len(segments) > 1 {
+			count = 2
+		}
+		return canonical(host, "/"+strings.Join(segments[:count], "/"), "")
+	case "nhs_jobs":
+		path = parsed.Path
+		query = parsed.RawQuery
+		return canonical(host, path, query)
+	case "avature":
+		return canonical(host, path, "")
+	case "ciphr_irecruit":
+		return canonical(host, "/templates/CIPHR/job_list.aspx", "")
+	case "employment_hero", "dayforce", "icims", "networx", "softgarden", "trakstar", "careers_page", "talent_soft", "ttcportals", "schoolrecruiter":
+		preservedPath := parsed.Path
+		if preservedPath == "" {
+			preservedPath = "/"
+		}
+		return canonical(host, preservedPath, parsed.RawQuery)
+	}
+	if path != "/" {
+		path = strings.TrimRight(path, "/")
+	}
+	return canonical(host, path, "")
 }
 
 func fetchPage(raw string, timeout time.Duration) FetchResult {
@@ -945,7 +1116,7 @@ func fetchPage(raw string, timeout time.Duration) FetchResult {
 	return result
 }
 
-func atsMatch(raw string) map[string]string {
+func atsMatchLegacy(raw string) map[string]string {
 	parsed := parseURL(raw)
 	if parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil
@@ -1069,6 +1240,472 @@ func atsMatch(raw string) map[string]string {
 	return nil
 }
 
+func atsMatch(raw string) map[string]string {
+	raw = normalizeATSCandidate(raw)
+	if raw == "" || atsIsBlocked(raw) {
+		return nil
+	}
+	parsed := parseURL(raw)
+	if parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil
+	}
+	host := strings.ToLower(parsed.Hostname())
+	segments := atsPathSegments(raw)
+	ok := func(provider, identifier string) map[string]string {
+		if identifier == "" {
+			return nil
+		}
+		return map[string]string{"provider": provider, "identifier": identifier, "url": canonicalizeATSURL(raw, provider), "raw_url": raw}
+	}
+	lowerSegment := func(index int) string {
+		if index < 0 || index >= len(segments) {
+			return ""
+		}
+		return strings.ToLower(segments[index])
+	}
+
+	if host == "apply.workable.com" {
+		first := lowerSegment(0)
+		if first != "" && first != "j" && !atsWorkableBlockedSegments[first] {
+			return ok("workable", first)
+		}
+		return nil
+	}
+	if strings.HasSuffix(host, ".workable.com") {
+		slug := strings.TrimSuffix(host, ".workable.com")
+		if slug != "" && slug != "www" && slug != "apply" {
+			return ok("workable", slug)
+		}
+		return nil
+	}
+	if blockedGreenhouseHosts[host] {
+		return nil
+	}
+	if host == "boards.greenhouse.io" || host == "job-boards.greenhouse.io" || strings.HasSuffix(host, ".greenhouse.io") {
+		board := ""
+		if len(segments) > 0 {
+			board = segments[0]
+		}
+		if strings.EqualFold(board, "embed") {
+			board = parsed.Query().Get("for")
+		}
+		if board == "" || strings.EqualFold(board, "embed") || blockedGreenhouseSegments[strings.ToLower(board)] {
+			return nil
+		}
+		return ok("greenhouse", board)
+	}
+	if host == "api.lever.co" {
+		if len(segments) >= 3 && strings.EqualFold(segments[0], "v0") && strings.EqualFold(segments[1], "postings") && !atsLeverBlockedSegments[strings.ToLower(segments[2])] {
+			return ok("lever", segments[2])
+		}
+		return nil
+	}
+	if host == "jobs.lever.co" || host == "jobs.eu.lever.co" {
+		company := ""
+		if len(segments) > 0 {
+			company = segments[0]
+		}
+		if company != "" && !atsLeverBlockedSegments[strings.ToLower(company)] {
+			return ok("lever", company)
+		}
+		return nil
+	}
+	if host == "jobs.smartrecruiters.com" || host == "careers.smartrecruiters.com" {
+		index := 0
+		if lowerSegment(0) == "ni" {
+			index = 1
+		}
+		company := ""
+		if index < len(segments) {
+			company = segments[index]
+		}
+		if company != "" && !atsSmartRecruitersNonBoardSegments[strings.ToLower(company)] {
+			return ok("smartrecruiters", company)
+		}
+		return nil
+	}
+	if host == "jobs.ashbyhq.com" || host == "ashbyhq.com" {
+		org := ""
+		if len(segments) > 0 {
+			org = segments[0]
+		}
+		if org != "" && strings.ToLower(org) != "embed" && strings.ToLower(org) != "api" {
+			return ok("ashby", org)
+		}
+		return nil
+	}
+	if host == "apply.careers.microsoft.com" || host == "explore.jobs.netflix.net" {
+		if len(segments) == 0 || lowerSegment(0) == "careers" {
+			identifier := strings.Join(segments, "/")
+			if identifier == "" {
+				identifier = "careers"
+			}
+			return ok("eightfold", identifier)
+		}
+		return nil
+	}
+	if strings.HasSuffix(host, ".teamtailor.com") {
+		sub := strings.TrimSuffix(host, ".teamtailor.com")
+		if sub != "" && !blockedTeamtailorSubdomains[sub] {
+			return ok("teamtailor", sub)
+		}
+		return nil
+	}
+	if host == "jobs.jobvite.com" {
+		company := ""
+		if len(segments) > 0 {
+			company = segments[0]
+		}
+		return ok("jobvite", company)
+	}
+	if host == "ats.rippling.com" {
+		if len(segments) == 0 {
+			return nil
+		}
+		index := 0
+		if isRipplingLocale(lowerSegment(0)) {
+			index = 1
+		}
+		if index >= len(segments) {
+			return nil
+		}
+		return ok("rippling", strings.ToLower(segments[index]))
+	}
+	if strings.HasSuffix(host, ".myworkdayjobs.com") {
+		tenant := strings.TrimSuffix(host, ".myworkdayjobs.com")
+		if tenant != "" && tenant != "www" && len(segments) > 0 && lowerSegment(0) != "wday" {
+			return ok("workday_cxs", tenant)
+		}
+		return nil
+	}
+	if host == "recruiting.paylocity.com" && len(segments) >= 4 && lowerSegment(0) == "recruiting" && lowerSegment(1) == "jobs" && atsPaylocityBoardRoutes[lowerSegment(2)] {
+		return ok("paylocity", strings.ToLower(segments[2]+"/"+segments[3]))
+	}
+	if host == "recruiting.ultipro.com" && len(segments) >= 3 && lowerSegment(1) == "jobboard" {
+		return ok("ultipro", strings.ToLower(segments[0]+"/"+segments[2]))
+	}
+	for _, provider := range []struct{ suffix, name string }{
+		{".bamboohr.com", "bamboohr"}, {".pinpointhq.com", "pinpoint"}, {".recruitee.com", "recruitee"},
+		{".breezy.hr", "breezy"}, {".careers.hibob.com", "hibob"}, {".livevacancies.co.uk", "hireful"},
+	} {
+		if strings.HasSuffix(host, provider.suffix) && host != strings.TrimPrefix(provider.suffix, ".") {
+			sub := strings.TrimSuffix(host, provider.suffix)
+			blocked := blockedATSSubdomains[strings.TrimPrefix(provider.suffix, ".")]
+			if sub != "" && !blocked[sub] {
+				return ok(provider.name, sub)
+			}
+			return nil
+		}
+	}
+	if atsPersonioHostRE.MatchString(host) {
+		sub := strings.SplitN(host, ".", 2)[0]
+		if sub != "" && sub != "www" {
+			return ok("personio", sub)
+		}
+		return nil
+	}
+	if host == "jobs.nhs.uk" || host == "beta.jobs.nhs.uk" || host == "www.jobs.nhs.uk" {
+		query := strings.ToLower(parsed.RawQuery)
+		bare := len(segments) == 0 || (len(segments) == 1 && lowerSegment(0) == "candidate") || (len(segments) == 2 && lowerSegment(0) == "candidate" && lowerSegment(1) == "search") || (len(segments) == 3 && lowerSegment(0) == "candidate" && lowerSegment(1) == "search" && lowerSegment(2) == "results")
+		if strings.Contains(query, "employer=") || strings.Contains(query, "keyword=") || !bare {
+			identifier := "nhs"
+			if len(segments) > 0 {
+				identifier = segments[0]
+			} else if len(query) > 80 {
+				identifier = query[:80]
+			} else if query != "" {
+				identifier = query
+			}
+			return ok("nhs_jobs", identifier)
+		}
+		return nil
+	}
+	if strings.HasSuffix(host, ".avature.net") && host != "avature.net" {
+		tenant := strings.TrimSuffix(host, ".avature.net")
+		if tenant == "" || strings.Contains(tenant, ".") || atsAvatureBlocked[tenant] {
+			return nil
+		}
+		if len(segments) > 0 && isAvatureLocale(segments[0]) {
+			if !strings.EqualFold(segments[0], "en_gb") {
+				return nil
+			}
+		}
+		portalIndex := 0
+		if len(segments) > 0 && isAvatureLocale(segments[0]) {
+			portalIndex = 1
+		}
+		portalSegment := lowerSegment(portalIndex)
+		portal := strings.Join(segments[:minInt(len(segments), 2)], "/")
+		identifier := tenant
+		if !avatureActionSegments[portalSegment] && portal != "" {
+			identifier += "/" + portal
+		}
+		return ok("avature", identifier)
+	}
+	if host == "employmenthero.com" || host == "www.employmenthero.com" {
+		path := "/" + strings.Join(segments, "/")
+		match := regexp.MustCompile(`(?i)(?:^|/)jobs/organisations/([a-z0-9-]+)$`).FindStringSubmatch(path)
+		if len(match) > 1 {
+			return ok("employment_hero", strings.ToLower(match[1]))
+		}
+		return nil
+	}
+	if strings.HasSuffix(host, ".dayforcehcm.com") && host != "dayforcehcm.com" && len(segments) >= 3 {
+		if regexp.MustCompile(`(?i)^[a-z]{2}(?:-[a-z]{2})?$`).MatchString(segments[0]) && regexp.MustCompile(`(?i)^[a-z0-9-]+$`).MatchString(segments[1]) && regexp.MustCompile(`(?i)^[a-z0-9-]+$`).MatchString(segments[2]) {
+			return ok("dayforce", strings.ToLower(segments[1]+"/"+segments[2]))
+		}
+		return nil
+	}
+	if strings.HasSuffix(host, ".icims.com") && host != "icims.com" && lowerSegment(0) == "jobs" {
+		return ok("icims", strings.TrimSuffix(host, ".icims.com"))
+	}
+	if strings.HasSuffix(host, ".ciphr-irecruit.com") && host != "ciphr-irecruit.com" {
+		path := "/" + strings.Join(segments, "/")
+		if regexp.MustCompile(`(?i)/(?:templates/CIPHR|applicants/vacancy)(?:/|$)`).MatchString(path) {
+			return ok("ciphr_irecruit", strings.TrimSuffix(host, ".ciphr-irecruit.com"))
+		}
+		return nil
+	}
+	for _, suffix := range atsNetworxSuffixes {
+		if host == strings.TrimPrefix(suffix, ".") || strings.HasSuffix(host, suffix) {
+			sub := host
+			if strings.HasSuffix(host, suffix) {
+				sub = strings.TrimSuffix(host, suffix)
+			}
+			if atsNetworxBlockedHosts[sub] || strings.Contains(sub, ".") {
+				return nil
+			}
+			clientID := parsed.Query().Get("cid")
+			identifier := host
+			if _, err := strconv.Atoi(clientID); err == nil && clientID != "" {
+				identifier = "cid:" + clientID
+			}
+			return ok("networx", identifier)
+		}
+	}
+	if strings.HasSuffix(host, ".softgarden.io") && host != "softgarden.io" {
+		path := "/" + strings.Join(segments, "/")
+		if len(segments) == 0 || regexp.MustCompile(`(?i)/(?:job|vacancies)(?:/|$)`).MatchString(path) {
+			return ok("softgarden", strings.TrimSuffix(host, ".softgarden.io"))
+		}
+		return nil
+	}
+	if strings.HasSuffix(host, ".hire.trakstar.com") && host != "hire.trakstar.com" && lowerSegment(0) == "jobs" {
+		return ok("trakstar", strings.TrimSuffix(host, ".hire.trakstar.com"))
+	}
+	if host == "careers-page.com" || host == "www.careers-page.com" {
+		slug := lowerSegment(0)
+		if slug != "" && regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`).MatchString(slug) {
+			return ok("careers_page", slug)
+		}
+		return nil
+	}
+	if strings.HasSuffix(host, ".talent-soft.com") && host != "talent-soft.com" {
+		path := "/" + strings.Join(segments, "/")
+		if regexp.MustCompile(`(?i)^/(?:job|stelle|accueil\.aspx)(?:/|$)`).MatchString(path) || regexp.MustCompile(`(?i)^/job/list-of-all-jobs\.aspx`).MatchString(path) {
+			return ok("talent_soft", strings.TrimSuffix(host, ".talent-soft.com"))
+		}
+		return nil
+	}
+	if strings.HasSuffix(host, ".ttcportals.com") && host != "ttcportals.com" && (lowerSegment(0) == "search" || lowerSegment(0) == "jobs") {
+		return ok("ttcportals", strings.TrimSuffix(host, ".ttcportals.com"))
+	}
+	if strings.HasSuffix(host, ".schoolrecruiter.com") && host != "schoolrecruiter.com" && (len(segments) == 0 || lowerSegment(0) == "job" || lowerSegment(0) == "jobseekers") {
+		return ok("schoolrecruiter", strings.TrimSuffix(host, ".schoolrecruiter.com"))
+	}
+	return nil
+}
+
+var atsAvatureBlocked = map[string]bool{"www": true, "www2": true, "api": true, "static": true, "cdn": true, "assets": true}
+
+func teamtailorParentCareersURL(body, customHost string) string {
+	for _, rawURL := range atsAbsURLRE.FindAllString(body, -1) {
+		parsed := parseURL(normalizeATSCandidate(rawURL))
+		if parsed == nil || strings.EqualFold(parsed.Hostname(), customHost) || !strings.HasPrefix(strings.ToLower(parsed.Hostname()), "careers.") || strings.TrimRight(parsed.Path, "/") != "/cookie-policy" {
+			continue
+		}
+		return "https://" + strings.ToLower(parsed.Hostname()) + "/jobs"
+	}
+	return ""
+}
+
+func teamtailorCustomDomainMatch(body, baseURL string) map[string]string {
+	if body == "" || baseURL == "" || !strings.Contains(strings.ToLower(body), "teamtailor") {
+		return nil
+	}
+	rssRE := regexp.MustCompile(`(?is)<link\b[^>]+rel=["'][^"']*alternate[^"']*["'][^>]+type=["']application/rss\+xml["'][^>]+href=["'][^"']*/jobs\.rss["']`)
+	if !rssRE.MatchString(body) {
+		return nil
+	}
+	customHost := hostname(baseURL)
+	if customHost == "" || strings.HasSuffix(customHost, ".teamtailor.com") {
+		return nil
+	}
+	fontRE := regexp.MustCompile(`(?i)fonts\.teamtailor-cdn\.com/teamtailor-production/[a-z0-9][a-z0-9-]*?(?:-\d+)?/custom-fonts\.css`)
+	companyRE := regexp.MustCompile(`(?i)https?://app\.teamtailor\.com/companies/([a-z0-9_-]+@[a-z0-9_-]+)(?:[/'?\s]|$)`)
+	careersiteRE := regexp.MustCompile(`(?i)(?:assets(?:-[a-z0-9-]+)?\.teamtailor-cdn\.com/[^"'<> ]*careersite-[^"'<> ]+\.css|data-careersite--ready)`)
+	atsURL := ""
+	identifier := customHost
+	if fontRE.MatchString(body) {
+		atsURL = teamtailorParentCareersURL(body, customHost)
+	} else {
+		company := companyRE.FindStringSubmatch(body)
+		if len(company) == 0 && !careersiteRE.MatchString(body) {
+			return nil
+		}
+		if len(company) > 1 {
+			identifier = company[1]
+		}
+		atsURL = teamtailorParentCareersURL(body, customHost)
+	}
+	if atsURL == "" {
+		atsURL = "https://" + customHost + "/"
+	} else {
+		identifier = hostname(atsURL)
+	}
+	return map[string]string{"provider": "teamtailor", "identifier": identifier, "url": atsURL, "raw_url": baseURL}
+}
+
+func extractATSCandidatesFromHTML(body, baseURL, sourceKind string) []map[string]string {
+	if body == "" {
+		return nil
+	}
+	candidates := []map[string]string{}
+	seen := map[string]bool{}
+	add := func(raw, discovery string) {
+		absolute := absoluteURL(raw, baseURL)
+		if absolute == "" {
+			absolute = raw
+		}
+		match := atsMatch(absolute)
+		if match == nil {
+			return
+		}
+		key := strings.ToLower(match["url"])
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		match["discovery"] = discovery
+		match["source_kind"] = sourceKind
+		candidates = append(candidates, match)
+	}
+	for _, anchor := range parseHTML(body, baseURL).Anchors {
+		add(anchor.Href, "href")
+	}
+	for _, raw := range atsAbsURLRE.FindAllString(body, -1) {
+		add(raw, "raw")
+	}
+	if custom := teamtailorCustomDomainMatch(body, baseURL); custom != nil {
+		key := strings.ToLower(custom["url"])
+		if !seen[key] {
+			custom["discovery"] = "custom"
+			custom["source_kind"] = sourceKind
+			candidates = append(candidates, custom)
+		}
+	}
+	return candidates
+}
+
+func pickBestATS(matches []map[string]string) map[string]string {
+	if len(matches) == 0 {
+		return nil
+	}
+	available := []map[string]string{}
+	allCheckedInactive := true
+	for _, item := range matches {
+		if item["availability_checked"] != "true" {
+			allCheckedInactive = false
+		}
+		if item["active"] == "true" {
+			available = append(available, item)
+			allCheckedInactive = false
+		}
+	}
+	if len(available) > 0 {
+		matches = available
+	} else if allCheckedInactive {
+		return nil
+	}
+	sourceRank := map[string]int{"external_careers": 0, "careers_page": 0, "vacancies_page": 0, "page_link": 0, "website": 1}
+	discoveryRank := map[string]int{"href": 0, "custom": 0, "raw": 1}
+	sort.SliceStable(matches, func(left, right int) bool {
+		leftURL, rightURL := matches[left]["url"], matches[right]["url"]
+		leftPath, rightPath := len(atsPathSegments(leftURL)), len(atsPathSegments(rightURL))
+		leftQuery, rightQuery := 0, 0
+		if parsed := parseURL(matches[left]["raw_url"]); parsed != nil && parsed.RawQuery != "" {
+			leftQuery = 1
+		}
+		if parsed := parseURL(matches[right]["raw_url"]); parsed != nil && parsed.RawQuery != "" {
+			rightQuery = 1
+		}
+		leftKey := []int{sourceRank[matches[left]["source_kind"]], discoveryRank[matches[left]["discovery"]], leftPath, leftQuery, len(leftURL)}
+		rightKey := []int{sourceRank[matches[right]["source_kind"]], discoveryRank[matches[right]["discovery"]], rightPath, rightQuery, len(rightURL)}
+		for index := range leftKey {
+			if leftKey[index] != rightKey[index] {
+				return leftKey[index] < rightKey[index]
+			}
+		}
+		return leftURL < rightURL
+	})
+	return matches[0]
+}
+
+var atsIdentityStopWords = map[string]bool{
+	"about": true, "apply": true, "career": true, "careers": true, "company": true, "contact": true,
+	"current": true, "employment": true, "home": true, "hiring": true, "join": true, "jobs": true,
+	"opportunities": true, "our": true, "people": true, "roles": true, "site": true, "team": true,
+	"the": true, "vacancies": true, "website": true, "work": true, "with": true, "www": true,
+	"ac": true, "au": true, "biz": true, "ca": true, "co": true, "com": true, "edu": true,
+	"gov": true, "ie": true, "info": true, "io": true, "me": true, "net": true, "org": true, "uk": true, "us": true,
+}
+var atsIdentityTokenRE = regexp.MustCompile(`[a-z0-9]+`)
+
+func atsIdentityTokens(values ...string) map[string]bool {
+	result := map[string]bool{}
+	for _, value := range values {
+		for _, token := range atsIdentityTokenRE.FindAllString(strings.ToLower(value), -1) {
+			if len(token) >= 3 && !atsIdentityStopWords[token] {
+				result[token] = true
+			}
+		}
+	}
+	return result
+}
+
+func externalCareersIdentityMatches(sourceURL string, source Page, externalURL string, external Page) bool {
+	sourceHost, externalHost := hostname(sourceURL), hostname(externalURL)
+	sourceValues := []string{sourceHost, source.Title}
+	externalValues := []string{externalHost, external.Title}
+	for _, value := range source.Headings {
+		if len(sourceValues) >= 5 {
+			break
+		}
+		sourceValues = append(sourceValues, value)
+	}
+	for _, value := range external.Headings {
+		if len(externalValues) >= 5 {
+			break
+		}
+		externalValues = append(externalValues, value)
+	}
+	sourceTokens, externalTokens := atsIdentityTokens(sourceValues...), atsIdentityTokens(externalValues...)
+	for token := range sourceTokens {
+		if externalTokens[token] {
+			return true
+		}
+	}
+	return false
+}
+
+func candidateURLs(candidates []map[string]string) []interface{} {
+	urls := make([]interface{}, 0, len(candidates))
+	for _, candidate := range candidates {
+		urls = append(urls, candidate["url"])
+	}
+	return urls
+}
+
 type atsCandidateFetcher func(string, time.Duration) FetchResult
 
 func atsStatusIsLive(status int) bool {
@@ -1128,7 +1765,11 @@ func verifyAvatureCandidate(candidate map[string]string, initial FetchResult, fe
 	if portal == "" || avatureActionSegments[strings.ToLower(portal)] {
 		return false, "Avature page has no job-board portal"
 	}
-	searchURL := "https://" + parsed.Hostname() + "/" + portal + "/SearchJobs/"
+	scheme := parsed.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	searchURL := scheme + "://" + parsed.Hostname() + "/" + portal + "/SearchJobs/"
 	search := fetch(searchURL, timeout)
 	if !atsStatusIsLive(search.Status) {
 		return false, fmt.Sprintf("Avature SearchJobs HTTP %d", search.Status)
@@ -1147,6 +1788,7 @@ func verifyATSCandidatesWith(candidates []map[string]string, timeout time.Durati
 			item[key] = value
 		}
 		initial := fetch(item["url"], timeout)
+		statusResult := initial
 		active := atsStatusIsLive(initial.Status)
 		errorMessage := ""
 		provider := item["provider"]
@@ -1160,6 +1802,7 @@ func verifyATSCandidatesWith(candidates []map[string]string, timeout time.Durati
 				break
 			}
 			probe := fetch("https://"+candidateURL.Hostname()+"/careers/list", timeout)
+			statusResult = probe
 			active = atsStatusIsLive(probe.Status) && atsFinalHostMatches(probe, candidateURL.Hostname())
 			if !active {
 				errorMessage = "BambooHR careers endpoint unavailable or redirected"
@@ -1168,6 +1811,7 @@ func verifyATSCandidatesWith(candidates []map[string]string, timeout time.Durati
 			parts := strings.Split(strings.Trim(item["url"], "/"), "/")
 			org := parts[len(parts)-1]
 			probe := fetch("https://api.ashbyhq.com/posting-api/job-board/"+org, timeout)
+			statusResult = probe
 			payload := map[string]interface{}{}
 			decodeErr := json.Unmarshal([]byte(probe.Body), &payload)
 			_, hasJobs := payload["jobs"].([]interface{})
@@ -1179,6 +1823,7 @@ func verifyATSCandidatesWith(candidates []map[string]string, timeout time.Durati
 			parts := strings.Split(strings.Trim(item["url"], "/"), "/")
 			board := parts[len(parts)-1]
 			probe := fetch("https://boards-api.greenhouse.io/v1/boards/"+board+"/jobs", timeout)
+			statusResult = probe
 			payload := map[string]interface{}{}
 			decodeErr := json.Unmarshal([]byte(probe.Body), &payload)
 			_, hasJobs := payload["jobs"].([]interface{})
@@ -1192,7 +1837,7 @@ func verifyATSCandidatesWith(candidates []map[string]string, timeout time.Durati
 			}
 		}
 		item["availability_checked"] = "true"
-		item["http_status"] = strconv.Itoa(initial.Status)
+		item["http_status"] = strconv.Itoa(statusResult.Status)
 		if active {
 			item["active"] = "true"
 		} else {
@@ -1374,6 +2019,12 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 			pageLinks[field] = value
 		}
 	}
+	ats := extractATSCandidatesFromHTML(body, finalURL, "website")
+	atsSeen := map[string]bool{}
+	for _, candidate := range ats {
+		atsSeen[strings.ToLower(candidate["url"])] = true
+	}
+	externalATSIdentityRejections := []interface{}{}
 	// A registrar/parking/lander response cannot provide useful company or ATS
 	// evidence. Avoid recursive requests once the root response is classified.
 	if recursive && !hosting {
@@ -1397,6 +2048,13 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 				continue
 			}
 			child := parseHTML(childBody, childFinal)
+			for _, candidate := range extractATSCandidatesFromHTML(childBody, childFinal, item.label) {
+				key := strings.ToLower(candidate["url"])
+				if key != "" && !atsSeen[key] {
+					atsSeen[key] = true
+					ats = append(ats, candidate)
+				}
+			}
 			page.Text += " " + child.Text
 			page.FooterText += " " + child.FooterText
 			page.Headings = append(page.Headings, child.Headings...)
@@ -1419,6 +2077,65 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 		}
 		page.Text, page.FooterText = cleanText(page.Text), cleanText(page.FooterText)
 		page.Headings = uniq(page.Headings, 25)
+	}
+	if recursive && !hosting {
+		externalVisited := map[string]bool{}
+		for _, field := range []string{"careers_page_link", "vacancies_page_link"} {
+			pageURL := pageLinks[field]
+			if pageURL == "" || hostname(pageURL) == host || atsMatch(pageURL) != nil || externalVisited[pageURL] {
+				continue
+			}
+			externalVisited[pageURL] = true
+			externalFetched := fetchPage(pageURL, timeout)
+			externalFinal := externalFetched.FinalURL
+			if externalFinal == "" {
+				externalFinal = pageURL
+			}
+			if externalFetched.Err != nil && externalFetched.Body == "" {
+				continue
+			}
+			externalPage := parseHTML(externalFetched.Body, externalFinal)
+			externalCandidates := extractATSCandidatesFromHTML(externalFetched.Body, externalFinal, "external_careers")
+			if externalCareersIdentityMatches(finalURL, page, pageURL, externalPage) {
+				for _, candidate := range externalCandidates {
+					key := strings.ToLower(candidate["url"])
+					if key != "" && !atsSeen[key] {
+						atsSeen[key] = true
+						ats = append(ats, candidate)
+					}
+				}
+			} else if len(externalCandidates) > 0 {
+				externalATSIdentityRejections = append(externalATSIdentityRejections, map[string]interface{}{"page": pageURL, "ats": candidateURLs(externalCandidates)})
+			}
+			for _, childField := range []string{"careers_page_link", "vacancies_page_link"} {
+				childURL := findPageLink(externalPage.Anchors, pageKeywords[childField], externalFinal)
+				if childURL == "" || hostname(childURL) != hostname(externalFinal) || externalVisited[childURL] {
+					continue
+				}
+				externalVisited[childURL] = true
+				childFetched := fetchPage(childURL, timeout)
+				childFinal := childFetched.FinalURL
+				if childFinal == "" {
+					childFinal = childURL
+				}
+				if childFetched.Err != nil && childFetched.Body == "" {
+					continue
+				}
+				childPage := parseHTML(childFetched.Body, childFinal)
+				childCandidates := extractATSCandidatesFromHTML(childFetched.Body, childFinal, "external_careers")
+				if externalCareersIdentityMatches(finalURL, page, childURL, childPage) {
+					for _, candidate := range childCandidates {
+						key := strings.ToLower(candidate["url"])
+						if key != "" && !atsSeen[key] {
+							atsSeen[key] = true
+							ats = append(ats, candidate)
+						}
+					}
+				} else if len(childCandidates) > 0 {
+					externalATSIdentityRejections = append(externalATSIdentityRejections, map[string]interface{}{"page": childURL, "ats": candidateURLs(childCandidates)})
+				}
+			}
+		}
 	}
 	social := map[string]string{}
 	for name, domains := range socialDomains {
@@ -1459,12 +2176,18 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 		phoneSeen[value] = true
 		phonesFound = append(phonesFound, map[string]interface{}{"number": value, "country_code": "GB", "source_page": "website", "type": "general", "contactable_for_job": false, "key_person": nil, "key_person_job_title": nil})
 	}
-	ats := []map[string]string{}
-	atsSeen := map[string]bool{}
-	for _, anchor := range page.Anchors {
-		if match := atsMatch(absoluteURL(anchor.Href, finalURL)); match != nil && !atsSeen[match["url"]] {
-			atsSeen[match["url"]] = true
-			ats = append(ats, match)
+	for _, field := range []string{"careers_page_link", "vacancies_page_link"} {
+		if pageURL := pageLinks[field]; pageURL != "" {
+			if match := atsMatch(pageURL); match != nil {
+				match["discovery"] = "href"
+				match["source_kind"] = "page_link"
+				key := strings.ToLower(match["url"])
+				if !atsSeen[key] {
+					atsSeen[key] = true
+					ats = append(ats, match)
+				}
+				delete(pageLinks, field)
+			}
 		}
 	}
 	ats = verifyATSCandidates(ats, timeout)
@@ -1494,12 +2217,9 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 	extra := map[string]interface{}{"post_code": postcodes, "company_number": registrations}
 	limitedEvidence := limitedCompanyEvidenceFromText(page.Text)
 	limited := limitedEvidence.Names
-	bestATS := map[string]string{}
-	for _, candidate := range ats {
-		if candidate["active"] == "true" {
-			bestATS = candidate
-			break
-		}
+	bestATS := pickBestATS(ats)
+	if bestATS == nil {
+		bestATS = map[string]string{}
 	}
 	legalNames := structuredStrings(page.Structured["legal_names"])
 	structuredNames := structuredStrings(page.Structured["names"])
@@ -1525,7 +2245,7 @@ func extractOne(raw string, timeout time.Duration, recursive bool) map[string]in
 		atsTraceable = len(bestATS) > 0
 	}
 	detail := map[string]interface{}{"website": nilString(finalURL), "active": active, "hosting": hosting, "location": nilString(location), "website_language": nilString(language), "logo_link": nilString(firstImage(page.Images, finalURL)), "twitter": nilString(social["twitter_link"]), "facebook": nilString(social["facebook_link"]), "linkedin": nilString(social["linkedin_link"]), "instagram": nilString(social["instagram_link"]), "youtube": nilString(social["youtube_link"]), "tiktok": nilString(social["tiktok_link"]), "contact_page": nilString(pageLinks["contact_page_link"]), "careers_page": nilString(pageLinks["careers_page_link"]), "vacancies_page": nilString(pageLinks["vacancies_page_link"]), "ats_page": nilString(bestATS["url"]), "terms_conditions_page": nilString(pageLinks["terms_and_conditions_page_link"]), "privacy_page": nilString(pageLinks["privacy_policy_page_link"]), "company_name": nilString(companyName), "company_description": nilString(description), "email": joinValues(emailsFound, "email"), "email_protected": strings.Contains(strings.ToLower(page.Text), "[email protected]"), "phone": joinValues(phonesFound, "number"), "new_emails": nilSlice(emailsFound), "new_phones": nilSlice(phonesFound), "extra_info": jsonValue(extra), "ats_traceable": atsTraceable}
-	meta := map[string]interface{}{"input_url": raw, "final_url": finalURL, "http_status": statusOrNil(status), "fetch_time_sec": time.Since(started).Seconds(), "job_category_hint": 11, "ats_provider": nilString(bestATS["provider"]), "ats_identifier": nilString(bestATS["identifier"]), "ats_candidates": ats, "error": errorOrNil(fetchErr), "fetch_via": fetched.Via, "fetch_attempts": fetched.Attempts, "truncated": false, "website_platform": nilString(websitePlatform), "website_platforms": websitePlatforms, "limited_company": firstOrNil(limited), "identity_evidence": identity, "external_ats_identity_rejections": []interface{}{}}
+	meta := map[string]interface{}{"input_url": raw, "final_url": finalURL, "http_status": statusOrNil(status), "fetch_time_sec": time.Since(started).Seconds(), "job_category_hint": 11, "ats_provider": nilString(bestATS["provider"]), "ats_identifier": nilString(bestATS["identifier"]), "ats_candidates": ats, "error": errorOrNil(fetchErr), "fetch_via": fetched.Via, "fetch_attempts": fetched.Attempts, "truncated": false, "website_platform": nilString(websitePlatform), "website_platforms": websitePlatforms, "limited_company": firstOrNil(limited), "identity_evidence": identity, "external_ats_identity_rejections": externalATSIdentityRejections}
 	return map[string]interface{}{"meta": meta, "company_detail": detail}
 }
 

@@ -159,7 +159,7 @@ func TestATSMatchSupportsEightfoldAndRejectsFalseBoards(t *testing.T) {
 			name:     "Teamtailor board",
 			input:    "https://acme.teamtailor.com/jobs",
 			provider: "teamtailor", identifier: "acme",
-			canonical: "https://acme.teamtailor.com",
+			canonical: "https://acme.teamtailor.com/",
 		},
 	}
 	for _, test := range tests {
@@ -244,6 +244,59 @@ func TestAvatureActionPageRequiresWorkingSearchEndpoint(t *testing.T) {
 	verified := verifyATSCandidatesWith([]map[string]string{candidate}, 0, fetch)
 	if verified[0]["active"] != "false" {
 		t.Fatalf("candidate = %#v, want inactive", verified[0])
+	}
+}
+
+func TestATSMatchMatchesPythonProviderRegistry(t *testing.T) {
+	tests := []struct {
+		input, provider, identifier, canonical string
+	}{
+		{"https://apply.workable.com/acme/jobs/123", "workable", "acme", "https://apply.workable.com/acme"},
+		{"https://job-boards.greenhouse.io/acme/jobs/123", "greenhouse", "acme", "https://job-boards.greenhouse.io/acme"},
+		{"https://boards.greenhouse.io/embed?for=acme", "greenhouse", "acme", "https://boards.greenhouse.io/acme"},
+		{"https://api.lever.co/v0/postings/acme", "lever", "acme", "https://jobs.lever.co/acme"},
+		{"https://careers.smartrecruiters.com/ni/acme/123", "smartrecruiters", "acme", "https://careers.smartrecruiters.com/acme"},
+		{"https://jobs.ashbyhq.com/acme/job/123", "ashby", "acme", "https://jobs.ashbyhq.com/acme"},
+		{"https://ats.rippling.com/en-gb/acme/jobs", "rippling", "acme", "https://ats.rippling.com/acme"},
+		{"https://foo.myworkdayjobs.com/en-US/FooCareerPage", "workday_cxs", "foo", "https://foo.myworkdayjobs.com/en-US/FooCareerPage"},
+		{"https://recruiting.paylocity.com/recruiting/jobs/all/acme", "paylocity", "all/acme", "https://recruiting.paylocity.com/recruiting/jobs/all/acme"},
+		{"https://recruiting.ultipro.com/acme/jobboard/jobs", "ultipro", "acme/jobs", "https://recruiting.ultipro.com/acme/jobboard/jobs"},
+		{"https://acme.bamboohr.com/careers/list", "bamboohr", "acme", "https://acme.bamboohr.com/"},
+		{"https://acme.pinpointhq.com/jobs", "pinpoint", "acme", "https://acme.pinpointhq.com/"},
+		{"https://acme.jobs.personio.com/", "personio", "acme", "https://acme.jobs.personio.com/"},
+		{"https://jobs.nhs.uk/search?employer=Acme", "nhs_jobs", "search", "https://jobs.nhs.uk/search?employer=Acme"},
+		{"https://acme.avature.net/en_gb/Careers/SearchJobs", "avature", "acme/en_gb/Careers", "https://acme.avature.net/en_gb/Careers/SearchJobs"},
+		{"https://employmenthero.com/jobs/organisations/acme", "employment_hero", "acme", "https://employmenthero.com/jobs/organisations/acme"},
+		{"https://acme.dayforcehcm.com/en-gb/acme/site", "dayforce", "acme/site", "https://acme.dayforcehcm.com/en-gb/acme/site"},
+		{"https://acme.icims.com/jobs/", "icims", "acme", "https://acme.icims.com/jobs/"},
+		{"https://acme.ciphr-irecruit.com/templates/CIPHR/job_list.aspx", "ciphr_irecruit", "acme", "https://acme.ciphr-irecruit.com/templates/CIPHR/job_list.aspx"},
+		{"https://acme.current-vacancies.com/jobs?cid=123", "networx", "cid:123", "https://acme.current-vacancies.com/jobs?cid=123"},
+		{"https://acme.softgarden.io/job", "softgarden", "acme", "https://acme.softgarden.io/job"},
+		{"https://acme.hire.trakstar.com/jobs", "trakstar", "acme", "https://acme.hire.trakstar.com/jobs"},
+		{"https://careers-page.com/acme", "careers_page", "acme", "https://careers-page.com/acme"},
+		{"https://acme.talent-soft.com/job/list-of-all-jobs.aspx", "talent_soft", "acme", "https://acme.talent-soft.com/job/list-of-all-jobs.aspx"},
+		{"https://acme.ttcportals.com/search", "ttcportals", "acme", "https://acme.ttcportals.com/search"},
+		{"https://acme.schoolrecruiter.com/job", "schoolrecruiter", "acme", "https://acme.schoolrecruiter.com/job"},
+	}
+	for _, test := range tests {
+		got := atsMatch(test.input)
+		if got == nil || got["provider"] != test.provider || got["identifier"] != test.identifier || got["url"] != test.canonical {
+			t.Errorf("atsMatch(%q) = %#v, want %s/%s/%s", test.input, got, test.provider, test.identifier, test.canonical)
+		}
+	}
+}
+
+func TestATSExtractionFindsRawAndCustomTeamtailorLinks(t *testing.T) {
+	body := `<link rel="alternate" type="application/rss+xml" href="/jobs.rss"><link href="https://fonts.teamtailor-cdn.com/teamtailor-production/acme-123/custom-fonts.css"><a href="https://job-boards.greenhouse.io/acme?embed=true">jobs</a>`
+	candidates := extractATSCandidatesFromHTML(body, "https://careers.acme.co.uk/", "website")
+	if len(candidates) != 2 {
+		t.Fatalf("ATS candidates = %#v, want raw Greenhouse and custom Teamtailor", candidates)
+	}
+	if candidates[0]["discovery"] != "href" || candidates[0]["source_kind"] != "website" {
+		t.Fatalf("candidate metadata = %#v", candidates)
+	}
+	if candidates[1]["provider"] != "teamtailor" || candidates[1]["url"] != "https://careers.acme.co.uk/" {
+		t.Fatalf("custom Teamtailor candidate = %#v", candidates[1])
 	}
 }
 
