@@ -300,6 +300,17 @@ func TestATSExtractionFindsRawAndCustomTeamtailorLinks(t *testing.T) {
 	}
 }
 
+func TestATSExtractionFindsCustomPinpointDomain(t *testing.T) {
+	body := `<link rel="alternate" type="application/rss+xml" href="/jobs.rss"><script src="https://app.pinpointhq.com/assets/careers.js"></script>`
+	candidates := extractATSCandidatesFromHTML(body, "https://careers.acme.co.uk/", "website")
+	if len(candidates) != 1 {
+		t.Fatalf("ATS candidates = %#v, want custom Pinpoint", candidates)
+	}
+	if candidates[0]["provider"] != "pinpoint" || candidates[0]["identifier"] != "careers.acme.co.uk" || candidates[0]["url"] != "https://careers.acme.co.uk/" {
+		t.Fatalf("custom Pinpoint candidate = %#v", candidates[0])
+	}
+}
+
 type temporaryTestError string
 
 func (e temporaryTestError) Error() string { return string(e) }

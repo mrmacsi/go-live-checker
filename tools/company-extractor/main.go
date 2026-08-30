@@ -1566,6 +1566,25 @@ func teamtailorCustomDomainMatch(body, baseURL string) map[string]string {
 	return map[string]string{"provider": "teamtailor", "identifier": identifier, "url": atsURL, "raw_url": baseURL}
 }
 
+// Pinpoint career sites may use the employer's own hostname. Their HTML still
+// exposes the platform's RSS feed and assets, but there is no pinpoint-hq URL
+// for atsMatch to recognise. Keep the employer URL so the downstream parser
+// can use the same custom-domain feed endpoint.
+func pinpointCustomDomainMatch(body, baseURL string) map[string]string {
+	if body == "" || baseURL == "" {
+		return nil
+	}
+	lower := strings.ToLower(body)
+	if !strings.Contains(lower, "pinpointhq") || !strings.Contains(lower, "jobs.rss") {
+		return nil
+	}
+	customHost := hostname(baseURL)
+	if customHost == "" || strings.HasSuffix(customHost, ".pinpointhq.com") {
+		return nil
+	}
+	return map[string]string{"provider": "pinpoint", "identifier": customHost, "url": "https://" + customHost + "/", "raw_url": baseURL}
+}
+
 func extractATSCandidatesFromHTML(body, baseURL, sourceKind string) []map[string]string {
 	if body == "" {
 		return nil
@@ -1597,6 +1616,14 @@ func extractATSCandidatesFromHTML(body, baseURL, sourceKind string) []map[string
 		add(raw, "raw")
 	}
 	if custom := teamtailorCustomDomainMatch(body, baseURL); custom != nil {
+		key := strings.ToLower(custom["url"])
+		if !seen[key] {
+			custom["discovery"] = "custom"
+			custom["source_kind"] = sourceKind
+			candidates = append(candidates, custom)
+		}
+	}
+	if custom := pinpointCustomDomainMatch(body, baseURL); custom != nil {
 		key := strings.ToLower(custom["url"])
 		if !seen[key] {
 			custom["discovery"] = "custom"
